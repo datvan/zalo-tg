@@ -1,4 +1,4 @@
-﻿import { ThreadType } from 'zca-js';
+import { ThreadType } from 'zca-js';
 import { createReadStream } from 'fs';
 import path from 'path';
 import QRCode from 'qrcode';
@@ -18,6 +18,68 @@ interface BankCardInfo {
   accountNumber: string;
   holderName?: string;
   vietqr: string;
+}
+
+
+interface LinkMeta {
+  finalUrl: string;
+  title?: string;
+  description?: string;
+  image?: string;
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractMeta(html: string, finalUrl: string): LinkMeta {
+  const pick = (patterns: RegExp[]) => {
+    for (const re of patterns) {
+      const m = html.match(re);
+      if (m?.[1]?.trim()) return decodeHtmlEntities(m[1].trim());
+    }
+    return undefined;
+  };
+  const title = pick([
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["'][^>]*>/i,
+    /<title[^>]*>([^<]+)<\/title>/i,
+  ]);
+  const description = pick([
+    /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["'][^>]*>/i,
+  ]);
+  const image = pick([
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["'][^>]*>/i,
+  ]);
+  return { finalUrl, title, description, image };
+}
+
+async function fetchLinkMeta(url: string): Promise<LinkMeta | null> {
+  try {
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    const finalUrl = resp.url || url;
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.includes('text/html')) return { finalUrl };
+    const html = await resp.text();
+    return extractMeta(html.slice(0, 300_000), finalUrl);
+  } catch (err) {
+    console.warn('[ZaloHandler] fetchLinkMeta failed:', err);
+    return null;
+  }
 }
 
 function parseBankCardHtml(html: string): BankCardInfo | null {
