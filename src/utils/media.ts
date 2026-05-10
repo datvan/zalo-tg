@@ -53,7 +53,7 @@ export async function convertToM4a(inputPath: string): Promise<string> {
       '-y', '-i', inputPath,
       '-c:a', 'aac', '-b:a', '64k', '-ar', '44100',
       '-vn', outputPath,
-    ]);
+    ], { windowsHide: true });
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
     ff.on('error', reject);
   });
@@ -72,7 +72,7 @@ export async function convertToMp4(inputPath: string): Promise<string> {
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
       '-an', outputPath,
-    ]);
+    ], { windowsHide: true });
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
     ff.on('error', reject);
   });
