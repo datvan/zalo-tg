@@ -8,6 +8,7 @@ import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
+import { canUseBridge, rejectUnauthorized } from '../security.js';
 
 // ── Mention resolution helper ──────────────────────────────────────────────
 
@@ -157,7 +158,7 @@ export function setupTelegramHandler(
   const setCurrentApi = (api: ZaloAPI) => { currentApi = api; };
 
   tgBot.command('login', async (ctx) => {
-    if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
     const threadId = ctx.message.message_thread_id;
     await handleLoginCommand(ctx.chat.id, threadId, (newApi) => {
       currentApi = newApi;
@@ -169,7 +170,7 @@ export function setupTelegramHandler(
   // Usage inside a topic:  /topic info | /topic delete
   // Usage from General:    /topic list
   tgBot.command('topic', async (ctx) => {
-    if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
     const topicId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -238,7 +239,7 @@ export function setupTelegramHandler(
   });
 
   tgBot.command('recall', async (ctx) => {
-    if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
     if (!currentApi) { await ctx.reply('❌ Zalo chưa kết nối'); return; }
 
     const replyTo = 'reply_to_message' in ctx.message
@@ -275,7 +276,7 @@ export function setupTelegramHandler(
   });
 
   tgBot.command('search', async (ctx) => {
-    if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
     // /search must be in General (no topicId) or any topic — reply to same thread
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
@@ -330,6 +331,8 @@ export function setupTelegramHandler(
   });
 
   tgBot.on('callback_query', async (ctx) => {
+    if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
+
     const data = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : undefined;
 
     if (data?.startsWith('lock_poll:')) {
@@ -503,7 +506,7 @@ export function setupTelegramHandler(
     try {
       const msg = ctx.message;
       // Only handle messages from our bridge group
-      if (ctx.chat.id !== config.telegram.groupId) return;
+      if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
 
       // Must originate from a topic (all bridged conversations live in topics)
       const topicId =
