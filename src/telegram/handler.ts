@@ -848,6 +848,17 @@ export function setupTelegramHandler(
 
       if ('sticker' in msg && msg.sticker) {
         const sticker = msg.sticker;
+        console.log('[TG→Zalo] Sticker meta:', JSON.stringify({
+          emoji: sticker.emoji,
+          set_name: sticker.set_name,
+          is_animated: sticker.is_animated,
+          is_video: sticker.is_video,
+          mime_type: sticker.file_id ? undefined : undefined,
+          file_size: sticker.file_size,
+          width: sticker.width,
+          height: sticker.height,
+          has_thumbnail: Boolean(sticker.thumbnail),
+        }));
 
         // Telegram video stickers are WEBM. Zalo treats WEBM poorly, so convert
         // to MP4 and upload as a video/document attachment to preserve motion.
