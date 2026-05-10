@@ -6,7 +6,7 @@ import type { ZaloAPI } from '../zalo/types.js';
 import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, mediaGroupStore } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4 } from '../utils/media.js';
+import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4 } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 
@@ -916,12 +916,62 @@ export function setupTelegramHandler(
           return;
         }
 
-        // Telegram animated stickers are TGS/Lottie. Keep thumbnail fallback until
-        // a Lottie renderer is added.
-        const useThumb = sticker.is_animated && sticker.thumbnail;
-        const fileId   = useThumb ? sticker.thumbnail!.file_id : sticker.file_id;
-        const ext      = useThumb ? '.jpg' : '.webp';
-        await sendAttachment(fileId, `sticker_${Date.now()}${ext}`);
+        // Telegram animated stickers are TGS/Lottie. Render to MP4 and send as
+        // native Zalo video to preserve motion.
+        if (sticker.is_animated) {
+          if ((sticker.file_size ?? 0) > TG_FILE_LIMIT) {
+            await notifyTooBig(`sticker_${Date.now()}.tgs`, sticker.file_size);
+            return;
+          }
+          let fileLink: URL;
+          try { fileLink = await ctx.telegram.getFileLink(sticker.file_id); }
+          catch (err: unknown) {
+            const isTooBig = err instanceof Error && err.message.includes('file is too big');
+            if (isTooBig) { await notifyTooBig(`sticker_${Date.now()}.tgs`, sticker.file_size); return; }
+            throw err;
+          }
+          const tgsPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.tgs`);
+          let mp4Path: string | undefined;
+          try {
+            mp4Path = await convertTgsToMp4(tgsPath);
+            console.log(`[TG→Zalo] Uploading animated sticker MP4 → zaloId=${zaloId} type=${threadType}`);
+            const uploaded = await api.uploadAttachment(mp4Path, zaloId, threadType) as Array<{
+              fileUrl?: string;
+              normalUrl?: string;
+              hdUrl?: string;
+              thumbUrl?: string;
+            }>;
+            console.log('[TG→Zalo] Animated sticker upload result:', JSON.stringify(uploaded[0] ?? {}));
+            const videoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+            const thumbnailUrl = uploaded[0]?.thumbUrl ?? videoUrl;
+            if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+            const sendResult = await api.sendVideo(
+              {
+                videoUrl,
+                thumbnailUrl,
+                duration: 3000,
+                width: sticker.width ?? 512,
+                height: sticker.height ?? 512,
+              },
+              zaloId,
+              threadType,
+            ) as { msgId?: number };
+            if (sendResult?.msgId !== undefined) {
+              sentMsgStore.save(msg.message_id, { msgId: sendResult.msgId, zaloId, threadType });
+            }
+            console.log('[TG→Zalo] Animated sticker sent as native video OK');
+          } catch (err) {
+            console.error('[TG→Zalo] Animated sticker render/send failed, falling back to thumbnail:', err);
+            if (sticker.thumbnail) await sendAttachment(sticker.thumbnail.file_id, `sticker_${Date.now()}.jpg`);
+            else await sendAttachment(sticker.file_id, `sticker_${Date.now()}.tgs`, sticker.file_size);
+          } finally {
+            await cleanTemp(tgsPath);
+            if (mp4Path) await cleanTemp(mp4Path);
+          }
+          return;
+        }
+
+        await sendAttachment(sticker.file_id, `sticker_${Date.now()}.webp`, sticker.file_size);
         return;
       }
 

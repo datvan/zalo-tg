@@ -1,7 +1,9 @@
 import axios from 'axios';
 import { createWriteStream, mkdirSync } from 'fs';
-import { unlink } from 'fs/promises';
+import { readFile, unlink, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
+import { gunzipSync } from 'zlib';
+import puppeteer from 'puppeteer';
 import path from 'path';
 import os from 'os';
 
@@ -77,6 +79,49 @@ export async function convertToMp4(inputPath: string): Promise<string> {
     ff.on('error', reject);
   });
   return outputPath;
+}
+
+/** Render Telegram TGS/Lottie sticker to MP4 using headless Chromium + ffmpeg. */
+export async function convertTgsToMp4(inputPath: string): Promise<string> {
+  mkdirSync(TMP_DIR, { recursive: true });
+  const raw = await readFile(inputPath);
+  const jsonText = gunzipSync(raw).toString('utf8');
+  const lottieJsonPath = path.join(TMP_DIR, `sticker_${Date.now()}.json`);
+  const webmPath = path.join(TMP_DIR, `sticker_${Date.now()}.webm`);
+  await writeFile(lottieJsonPath, jsonText, 'utf8');
+
+  const browser = await puppeteer.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 512, height: 512, deviceScaleFactor: 1 });
+    await page.goto('about:blank');
+    await page.addScriptTag({ path: require.resolve('lottie-web/build/player/lottie.min.js') });
+    await page.setContent(`<!doctype html><html><body style="margin:0;background:transparent;overflow:hidden"><div id="anim" style="width:512px;height:512px"></div></body></html>`);
+    await page.evaluate(async (animData) => {
+      await new Promise<void>((resolve, reject) => {
+        const anim = (window as any).lottie.loadAnimation({
+          container: document.getElementById('anim'),
+          renderer: 'svg',
+          loop: true,
+          autoplay: true,
+          animationData: animData,
+        });
+        anim.addEventListener('DOMLoaded', () => resolve());
+        anim.addEventListener('data_failed', () => reject(new Error('lottie data_failed')));
+      });
+    }, JSON.parse(jsonText));
+
+    const stream = await page.screencast({ path: webmPath as `${string}.webm` });
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    await stream.stop();
+  } finally {
+    await browser.close();
+    await cleanTemp(lottieJsonPath);
+  }
+
+  const mp4Path = await convertToMp4(webmPath);
+  await cleanTemp(webmPath);
+  return mp4Path;
 }
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
