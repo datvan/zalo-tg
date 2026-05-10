@@ -4,6 +4,9 @@ import { readFile, unlink, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
 import { gunzipSync } from 'zlib';
 import puppeteer from 'puppeteer';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 import path from 'path';
 import os from 'os';
 
