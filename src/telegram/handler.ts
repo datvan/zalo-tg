@@ -870,11 +870,14 @@ export function setupTelegramHandler(
             console.log(`[TG→Zalo] Uploading video sticker MP4 → zaloId=${zaloId} type=${threadType}`);
             const uploaded = await api.uploadAttachment(mp4Path, zaloId, threadType) as Array<{
               fileUrl?: string;
+              normalUrl?: string;
+              hdUrl?: string;
               thumbUrl?: string;
               fileName?: string;
             }>;
-            const videoUrl = uploaded[0]?.fileUrl;
-            const thumbnailUrl = uploaded[0]?.thumbUrl;
+            console.log('[TG→Zalo] Video sticker upload result:', JSON.stringify(uploaded[0] ?? {}));
+            const videoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+            const thumbnailUrl = uploaded[0]?.thumbUrl ?? videoUrl;
             if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
             const sendResult = await api.sendVideo(
               {
