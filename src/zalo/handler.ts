@@ -1036,22 +1036,40 @@ ${escapeHtml(photoCaption)}`
 
       const gMsgIds: Array<{ gMsgID?: string | number }> = data?.content?.rMsg ?? [];
       const zaloMsgId = String(gMsgIds[0]?.gMsgID ?? '');
-      if (!zaloMsgId) return;
-
-      const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
-      if (tgMsgId === undefined) return;
+      if (!zaloMsgId) {
+        console.warn('[ZaloHandler] Reaction skipped: missing zaloMsgId', JSON.stringify(data?.content ?? {}));
+        return;
+      }
 
       const zaloId = reaction?.threadId ?? data?.idTo;
       const type   = (reaction?.isGroup ? 1 : 0) as 0 | 1;
       const topicId = store.getTopicByZalo(String(zaloId), type);
-      if (topicId === undefined) return;
+      if (topicId === undefined) {
+        console.warn(`[ZaloHandler] Reaction skipped: no topic for zaloId=${zaloId} type=${type}`);
+        return;
+      }
 
-      const dName = data?.dName ?? data?.uidFrom ?? 'ai Ä‘Ã³';
+      const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
+      const dName = data?.dName ?? data?.uidFrom ?? 'ai đó';
+      const text = tgMsgId === undefined
+        ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message` + `
+<code>${escapeHtml(zaloMsgId)}</code>`
+        : `${emoji} <b>${escapeHtml(dName)}</b>`;
+
+      if (tgMsgId === undefined) {
+        console.warn(`[ZaloHandler] Reaction fallback: no TG mapping for zaloMsgId=${zaloMsgId}`);
+        await tgBot.telegram.sendMessage(
+          config.telegram.groupId,
+          text,
+          { message_thread_id: topicId, parse_mode: 'HTML' },
+        );
+        return;
+      }
 
       // Send reaction emoji as a reply to the forwarded TG message
       await tgBot.telegram.sendMessage(
         config.telegram.groupId,
-        `${emoji} <b>${escapeHtml(dName)}</b>`,
+        text,
         {
           message_thread_id: topicId,
           parse_mode: 'HTML',
