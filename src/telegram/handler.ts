@@ -867,17 +867,30 @@ export function setupTelegramHandler(
           let mp4Path: string | undefined;
           try {
             mp4Path = await convertToMp4(webmPath);
-            console.log(`[TG→Zalo] Sending video sticker MP4 → zaloId=${zaloId} type=${threadType}`);
-            const sendResult = await api.sendMessage(
-              { msg: '', attachments: [mp4Path] },
+            console.log(`[TG→Zalo] Uploading video sticker MP4 → zaloId=${zaloId} type=${threadType}`);
+            const uploaded = await api.uploadAttachment(mp4Path, zaloId, threadType) as Array<{
+              fileUrl?: string;
+              thumbUrl?: string;
+              fileName?: string;
+            }>;
+            const videoUrl = uploaded[0]?.fileUrl;
+            const thumbnailUrl = uploaded[0]?.thumbUrl;
+            if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+            const sendResult = await api.sendVideo(
+              {
+                videoUrl,
+                thumbnailUrl,
+                duration: 3000,
+                width: sticker.width ?? 512,
+                height: sticker.height ?? 512,
+              },
               zaloId,
               threadType,
-            ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
-            const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
-            if (zaloMsgId !== undefined) {
-              sentMsgStore.save(msg.message_id, { msgId: zaloMsgId, zaloId, threadType });
+            ) as { msgId?: number };
+            if (sendResult?.msgId !== undefined) {
+              sentMsgStore.save(msg.message_id, { msgId: sendResult.msgId, zaloId, threadType });
             }
-            console.log('[TG→Zalo] Video sticker sent OK');
+            console.log('[TG→Zalo] Video sticker sent as native video OK');
           } catch (err) {
             console.error('[TG→Zalo] Video sticker convert/send failed, falling back to thumbnail:', err);
             if (sticker.thumbnail) await sendAttachment(sticker.thumbnail.file_id, `sticker_${Date.now()}.jpg`);
