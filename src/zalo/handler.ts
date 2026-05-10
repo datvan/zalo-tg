@@ -667,12 +667,38 @@ ${escapeHtml(photoCaption)}`
         };
         const icon = ACTION_ICONS[media.action ?? ''] ?? '📋';
         const href = media.href;
-        const safeLabel = escapeHtml(label);
-        const safeHref = href ? escapeHtml(href) : undefined;
         if (!href) console.warn('[ZaloHandler] Webcontent has no href:', JSON.stringify({ action: media.action, title: media.title, params: media.params?.slice(0, 300) }));
-        const body = safeHref ? `${icon} ${safeLabel}\n${safeHref}` : `${icon} ${safeLabel}`;
-        const text = type === ThreadType.Group ? `${groupCaption(senderName)}\n${body}` : body;
-        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, text, {
+
+        const meta = href ? await fetchLinkMeta(href) : null;
+        const finalUrl = meta?.finalUrl ?? href;
+        const displayTitle = meta?.title || label;
+        const description = meta?.description;
+        const lines = [
+          `${icon} ${escapeHtml(displayTitle)}`,
+          description ? escapeHtml(truncate(description, 500)) : undefined,
+          finalUrl ? escapeHtml(finalUrl) : undefined,
+        ].filter((v): v is string => Boolean(v));
+        const caption = type === ThreadType.Group ? `${groupCaption(senderName)}\n${lines.join('\n')}` : lines.join('\n');
+
+        if (meta?.image) {
+          try {
+            const localPath = await downloadToTemp(meta.image, `link_thumb_${Date.now()}.jpg`);
+            try {
+              const stream = createReadStream(localPath);
+              const sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, {
+                ...tgBase,
+                caption,
+                parse_mode: 'HTML',
+              });
+              saveTgMapping(sent);
+              return;
+            } finally { await cleanTemp(localPath); }
+          } catch (err) {
+            console.warn('[ZaloHandler] link thumbnail send failed:', err);
+          }
+        }
+
+        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, caption, {
           ...tgBase,
           parse_mode: 'HTML',
           link_preview_options: { is_disabled: false },
