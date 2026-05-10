@@ -193,7 +193,11 @@ export function setupZaloHandler(api: ZaloAPI): void {
 
   api.listener.on('message', async (msg: ZaloMessage) => {
     try {
-      if (msg.isSelf) return;
+      if (msg.isSelf) {
+        const ownMsgIds = [msg.data?.msgId, msg.data?.realMsgId]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0);
+        if (ownMsgIds.some(id => sentMsgStore.getByZaloMsgId(id) !== undefined)) return;
+      }
 
       const zaloId     = msg.threadId;
       const type       = msg.type as 0 | 1;
