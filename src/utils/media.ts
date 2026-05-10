@@ -60,6 +60,25 @@ export async function convertToM4a(inputPath: string): Promise<string> {
   return outputPath;
 }
 
+/** Convert Telegram video sticker/webm to MP4 so Zalo receives motion, not a still thumbnail. */
+export async function convertToMp4(inputPath: string): Promise<string> {
+  mkdirSync(TMP_DIR, { recursive: true });
+  const outputPath = path.join(TMP_DIR, `animation_${Date.now()}.mp4`);
+  await new Promise<void>((resolve, reject) => {
+    const ff = spawn('ffmpeg', [
+      '-y', '-i', inputPath,
+      '-movflags', '+faststart',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+      '-an', outputPath,
+    ]);
+    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
+    ff.on('error', reject);
+  });
+  return outputPath;
+}
+
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv']);
 

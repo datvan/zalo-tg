@@ -6,7 +6,7 @@ import type { ZaloAPI } from '../zalo/types.js';
 import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, mediaGroupStore } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, cleanTemp, convertToM4a } from '../utils/media.js';
+import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4 } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 
@@ -848,9 +848,50 @@ export function setupTelegramHandler(
 
       if ('sticker' in msg && msg.sticker) {
         const sticker = msg.sticker;
-        // For animated (tgs) or video (webm) stickers, use the jpg thumbnail
-        // so Zalo receives a viewable image instead of a binary animation blob.
-        const useThumb = (sticker.is_animated || sticker.is_video) && sticker.thumbnail;
+
+        // Telegram video stickers are WEBM. Zalo treats WEBM poorly, so convert
+        // to MP4 and upload as a video/document attachment to preserve motion.
+        if (sticker.is_video) {
+          if ((sticker.file_size ?? 0) > TG_FILE_LIMIT) {
+            await notifyTooBig(`sticker_${Date.now()}.webm`, sticker.file_size);
+            return;
+          }
+          let fileLink: URL;
+          try { fileLink = await ctx.telegram.getFileLink(sticker.file_id); }
+          catch (err: unknown) {
+            const isTooBig = err instanceof Error && err.message.includes('file is too big');
+            if (isTooBig) { await notifyTooBig(`sticker_${Date.now()}.webm`, sticker.file_size); return; }
+            throw err;
+          }
+          const webmPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.webm`);
+          let mp4Path: string | undefined;
+          try {
+            mp4Path = await convertToMp4(webmPath);
+            console.log(`[TG→Zalo] Sending video sticker MP4 → zaloId=${zaloId} type=${threadType}`);
+            const sendResult = await api.sendMessage(
+              { msg: '', attachments: [mp4Path] },
+              zaloId,
+              threadType,
+            ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
+            const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
+            if (zaloMsgId !== undefined) {
+              sentMsgStore.save(msg.message_id, { msgId: zaloMsgId, zaloId, threadType });
+            }
+            console.log('[TG→Zalo] Video sticker sent OK');
+          } catch (err) {
+            console.error('[TG→Zalo] Video sticker convert/send failed, falling back to thumbnail:', err);
+            if (sticker.thumbnail) await sendAttachment(sticker.thumbnail.file_id, `sticker_${Date.now()}.jpg`);
+            else await sendAttachment(sticker.file_id, `sticker_${Date.now()}.webm`, sticker.file_size);
+          } finally {
+            await cleanTemp(webmPath);
+            if (mp4Path) await cleanTemp(mp4Path);
+          }
+          return;
+        }
+
+        // Telegram animated stickers are TGS/Lottie. Keep thumbnail fallback until
+        // a Lottie renderer is added.
+        const useThumb = sticker.is_animated && sticker.thumbnail;
         const fileId   = useThumb ? sticker.thumbnail!.file_id : sticker.file_id;
         const ext      = useThumb ? '.jpg' : '.webp';
         await sendAttachment(fileId, `sticker_${Date.now()}${ext}`);
