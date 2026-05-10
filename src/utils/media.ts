@@ -93,38 +93,74 @@ export async function convertTgsToMp4(inputPath: string): Promise<string> {
   const webmPath = path.join(TMP_DIR, `sticker_${Date.now()}.webm`);
   await writeFile(lottieJsonPath, jsonText, 'utf8');
 
-  const browser = await puppeteer.launch({ headless: true });
+  const framesDir = path.join(TMP_DIR, `frames_${Date.now()}`);
+  mkdirSync(framesDir, { recursive: true });
+  const animData = JSON.parse(jsonText) as { fr?: number; ip?: number; op?: number };
+  const fps = Math.min(60, Math.max(24, Math.round(animData.fr ?? 30)));
+  const startFrame = Math.floor(animData.ip ?? 0);
+  const endFrame = Math.ceil(animData.op ?? startFrame + fps * 3);
+  const maxFrames = fps * 3;
+  const frameCount = Math.min(maxFrames, Math.max(1, endFrame - startFrame));
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    pipe: true,
+    args: ['--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check'],
+  });
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 512, height: 512, deviceScaleFactor: 1 });
     await page.goto('about:blank');
     await page.addScriptTag({ path: require.resolve('lottie-web/build/player/lottie.min.js') });
-    await page.setContent(`<!doctype html><html><body style="margin:0;background:transparent;overflow:hidden"><div id="anim" style="width:512px;height:512px"></div></body></html>`);
-    await page.evaluate(async (animData) => {
+    await page.setContent(`<!doctype html><html><body style="margin:0;background:#000;overflow:hidden"><div id="anim" style="width:512px;height:512px"></div></body></html>`);
+    await page.evaluate(async (data) => {
       await new Promise<void>((resolve, reject) => {
         const anim = (window as any).lottie.loadAnimation({
           container: document.getElementById('anim'),
           renderer: 'svg',
-          loop: true,
-          autoplay: true,
-          animationData: animData,
+          loop: false,
+          autoplay: false,
+          animationData: data,
         });
+        (window as any).__tgStickerAnim = anim;
         anim.addEventListener('DOMLoaded', () => resolve());
         anim.addEventListener('data_failed', () => reject(new Error('lottie data_failed')));
       });
-    }, JSON.parse(jsonText));
+    }, animData);
 
-    const stream = await page.screencast({ path: webmPath as `${string}.webm` });
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    await stream.stop();
+    for (let i = 0; i < frameCount; i++) {
+      const frameNo = startFrame + i;
+      await page.evaluate((f) => {
+        (window as any).__tgStickerAnim.goToAndStop(f, true);
+      }, frameNo);
+      const framePath = path.join(framesDir, `frame_${String(i + 1).padStart(4, '0')}.png`);
+      await page.screenshot({ path: framePath as `${string}.png`, omitBackground: false });
+    }
   } finally {
     await browser.close();
     await cleanTemp(lottieJsonPath);
   }
 
-  const mp4Path = await convertToMp4(webmPath);
-  await cleanTemp(webmPath);
-  return mp4Path;
+  const outputPath = path.join(TMP_DIR, `animation_${Date.now()}.mp4`);
+  await new Promise<void>((resolve, reject) => {
+    const ff = spawn('ffmpeg', [
+      '-y', '-framerate', String(fps),
+      '-i', path.join(framesDir, 'frame_%04d.png'),
+      '-movflags', '+faststart',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-an', outputPath,
+    ], { windowsHide: true });
+    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
+    ff.on('error', reject);
+  });
+
+  try {
+    const { rm } = await import('fs/promises');
+    await rm(framesDir, { recursive: true, force: true });
+  } catch { /* ignore */ }
+  return outputPath;
 }
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
