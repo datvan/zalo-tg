@@ -776,7 +776,9 @@ export function setupTelegramHandler(
       }
 
       if ('animation' in msg && msg.animation) {
-        const fname = msg.animation.file_name ?? 'animation.gif';
+        const mime = msg.animation.mime_type ?? '';
+        const ext = mime === 'video/mp4' ? '.mp4' : mime === 'image/gif' ? '.gif' : '.mp4';
+        const fname = msg.animation.file_name ?? `animation_${Date.now()}${ext}`;
         const { cap, capMentions } = getCaptionMentions();
         await sendAttachment(msg.animation.file_id, fname, msg.animation.file_size, cap, capMentions);
         return;
