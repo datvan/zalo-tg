@@ -1,4 +1,4 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 import { createWriteStream, mkdirSync } from 'fs';
 import { readFile, unlink, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
@@ -75,7 +75,7 @@ export async function convertToMp4(inputPath: string): Promise<string> {
       '-movflags', '+faststart',
       '-pix_fmt', 'yuv420p',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+      '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-b:v', '0',
       '-an', outputPath,
     ], { windowsHide: true });
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
@@ -149,7 +149,7 @@ export async function convertTgsToMp4(inputPath: string): Promise<string> {
       '-movflags', '+faststart',
       '-pix_fmt', 'yuv420p',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '20', '-b:v', '0',
       '-an', outputPath,
     ], { windowsHide: true });
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
@@ -176,3 +176,4 @@ export function detectMediaType(fileNameOrUrl: string): 'image' | 'video' | 'doc
   if (/\.(mp4|mov|avi|mkv|webm)(\?|$)/.test(lower))  return 'video';
   return 'document';
 }
+

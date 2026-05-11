@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, statSync } from 'fs';
+﻿import { mkdirSync, readdirSync, statSync } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { cleanTemp } from './media.js';
@@ -40,7 +40,7 @@ async function normalizeForZalo(inputPath: string, suffix = ''): Promise<string>
       '-y', '-i', inputPath,
       '-map', '0:v:0', '-map', '0:a:0?',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+      '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-b:v', '0',
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
       '-movflags', '+faststart',
@@ -81,7 +81,7 @@ async function normalizeSegmentForZalo(inputPath: string, start: number, duratio
       '-t', String(duration),
       '-map', '0:v:0', '-map', '0:a:0?',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+      '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-b:v', '0',
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
       '-movflags', '+faststart',
@@ -156,3 +156,4 @@ export async function downloadSocialVideo(url: string): Promise<string[]> {
     for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
+
