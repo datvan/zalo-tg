@@ -960,7 +960,7 @@ ${escapeHtml(photoCaption)}`
       const zaloMsgId = String(data?.content?.globalMsgId ?? data?.msgId ?? '');
       if (!zaloMsgId) return;
 
-      const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
+      const tgMsgId = msgStore.getTgMsgId(zaloMsgId) ?? sentMsgStore.getByZaloMsgId(zaloMsgId);
       if (tgMsgId === undefined) {
         console.log(`[ZaloHandler] Undo: no TG mapping for zaloMsgId=${zaloMsgId}`);
         return;
@@ -1050,7 +1050,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
+      const tgMsgId = msgStore.getTgMsgId(zaloMsgId) ?? sentMsgStore.getByZaloMsgId(zaloMsgId);
       const dName = data?.dName ?? data?.uidFrom ?? 'ai Ä‘Ã³';
       const text = tgMsgId === undefined
         ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message`
@@ -1179,5 +1179,6 @@ ${escapeHtml(photoCaption)}`
     }
   });
 }
+
 
 
