@@ -1,4 +1,4 @@
-import { ThreadType } from 'zca-js';
+﻿import { ThreadType } from 'zca-js';
 import { createReadStream } from 'fs';
 import path from 'path';
 import QRCode from 'qrcode';
@@ -12,7 +12,7 @@ import { downloadToTemp, cleanTemp } from '../utils/media.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 
-// â”€â”€ Bank card HTML parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Bank card HTML parser Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 interface BankCardInfo {
   bankName: string;
   accountNumber: string;
@@ -103,7 +103,7 @@ function parseBankCardHtml(html: string): BankCardInfo | null {
   return { bankName, accountNumber, holderName, vietqr };
 }
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /**
  * Fetch group member list and populate `userCache` so mention resolution works
@@ -123,7 +123,7 @@ async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<
       return;
     }
 
-    // memVerList entries are "uid_version" â€” extract UIDs
+    // memVerList entries are "uid_version" Ã¢â‚¬â€ extract UIDs
     const uids = (groupData.memVerList ?? [])
       .map(s => s.split('_')[0])
       .filter(Boolean);
@@ -176,7 +176,7 @@ async function getOrCreateTopic(
 
   const topicId = topic.message_thread_id;
   store.set({ topicId, zaloId, type, name: displayName });
-  console.log(`[Zaloâ†’TG] New topic: "${name}" (topicId=${topicId})`);
+  console.log(`[ZaloÃ¢â€ â€™TG] New topic: "${name}" (topicId=${topicId})`);
 
   // Pin group avatar as the first message in the topic
   if (type === 1 /* Group */ && avatarUrl) {
@@ -188,7 +188,7 @@ async function getOrCreateTopic(
         { source: stream },
         {
           message_thread_id: topicId,
-          caption: `ðŸ–¼ áº¢nh Ä‘áº¡i diá»‡n nhÃ³m <b>${escapeHtml(displayName)}</b>`,
+          caption: `Ã°Å¸â€“Â¼ Ã¡ÂºÂ¢nh Ã„â€˜Ã¡ÂºÂ¡i diÃ¡Â»â€¡n nhÃƒÂ³m <b>${escapeHtml(displayName)}</b>`,
           parse_mode: 'HTML',
         },
       );
@@ -197,7 +197,7 @@ async function getOrCreateTopic(
         await tgBot.telegram.pinChatMessage(config.telegram.groupId, avatarMsg.message_id, { disable_notification: true });
       } catch { /* pinning requires admin rights */ }
     } catch (avatarErr) {
-      console.warn(`[Zaloâ†’TG] Failed to pin group avatar for ${displayName}:`, avatarErr);
+      console.warn(`[ZaloÃ¢â€ â€™TG] Failed to pin group avatar for ${displayName}:`, avatarErr);
     }
   }
 
@@ -224,7 +224,7 @@ function parseContent(raw: string | ZaloMediaContent | Record<string, unknown>):
   return { text: null, media: raw as ZaloMediaContent };
 }
 
-// â”€â”€ Poll helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Poll helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 import type { PollOptions } from 'zca-js';
 
@@ -232,14 +232,14 @@ function buildScoreText(header: string, options: Pick<PollOptions, 'content' | '
   const total = options.reduce((s, o) => s + (o.votes ?? 0), 0);
   const lines = options.map(o => {
     const pct = total > 0 ? Math.round((o.votes / total) * 100) : 0;
-    const bar = 'â–ˆ'.repeat(Math.round(pct / 10)) + 'â–‘'.repeat(10 - Math.round(pct / 10));
-    return `${escapeHtml(o.content)}\n  ${bar} ${o.votes} phiáº¿u (${pct}%)`;
+    const bar = 'Ã¢â€“Ë†'.repeat(Math.round(pct / 10)) + 'Ã¢â€“â€˜'.repeat(10 - Math.round(pct / 10));
+    return `${escapeHtml(o.content)}\n  ${bar} ${o.votes} phiÃ¡ÂºÂ¿u (${pct}%)`;
   });
-  const status = closed ? ' <i>[ÄÃ£ Ä‘Ã³ng]</i>' : '';
-  return `ðŸ“Š <b>${escapeHtml(header)}</b>${status}\n\nTá»•ng: ${total} phiáº¿u\n\n${lines.join('\n\n')}`;
+  const status = closed ? ' <i>[Ã„ÂÃƒÂ£ Ã„â€˜ÃƒÂ³ng]</i>' : '';
+  return `Ã°Å¸â€œÅ  <b>${escapeHtml(header)}</b>${status}\n\nTÃ¡Â»â€¢ng: ${total} phiÃ¡ÂºÂ¿u\n\n${lines.join('\n\n')}`;
 }
 
-// â”€â”€ Main handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Main handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /** Track which groups already had their member cache populated this session. */
 const _memberCacheLoaded = new Set<string>();
@@ -272,7 +272,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
         void populateGroupMemberCache(api, zaloId);
       }
 
-      // Keep userCache up-to-date so TGâ†’Zalo mention resolution works
+      // Keep userCache up-to-date so TGÃ¢â€ â€™Zalo mention resolution works
       userCache.save(msg.data.uidFrom, senderName);
 
       // Resolve group name
@@ -309,7 +309,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
       const caption = type === ThreadType.Group ? groupCaption(senderName) : undefined;
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
-      // Build quote data + mapping helper â€” saved after every successful TG send
+      // Build quote data + mapping helper Ã¢â‚¬â€ saved after every successful TG send
       const zaloMsgIds = msg.data.realMsgId && msg.data.realMsgId !== msg.data.msgId
         ? [msg.data.msgId, msg.data.realMsgId]
         : [msg.data.msgId];
@@ -330,7 +330,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
 
       const { text, media } = parseContent(msg.data.content);
 
-      // â”€â”€ 1. Plain text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Plain text Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.TEXT || (text !== null)) {
         const body = text ?? (typeof msg.data.content === 'string' ? msg.data.content : '');
         if (!body.trim()) return;
@@ -350,7 +350,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
         return;
       }
 
-      // â”€â”€ 2. Photo / Image â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 2. Photo / Image Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.PHOTO) {
         // prefer HD from params, fall back to href
         let url = media.href;
@@ -368,7 +368,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
         const childnumber: number = (media as { childnumber?: number }).childnumber ?? 0;
         const albumKey = `${zaloId}:${msg.data.uidFrom}`;
 
-        // If childnumber > 0 OR there's already a buffer for this key â†’ album mode
+        // If childnumber > 0 OR there's already a buffer for this key Ã¢â€ â€™ album mode
         const hasBuffer = (typeof zaloAlbumStore as unknown as { _has?: (k: string) => boolean })._has?.(albumKey);
         void hasBuffer; // unused, we detect via the add callback
 
@@ -379,7 +379,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
           { senderName, topicId, tgBase, zaloQuote: zaloQuoteData },
           async (buf) => {
             if (buf.urls.length === 1) {
-              // Single photo â€” send normally
+              // Single photo Ã¢â‚¬â€ send normally
               const singleUrl = buf.urls[0]!;
               const localPath = await downloadToTemp(singleUrl, `photo_${Date.now()}.jpg`);
               const stream = createReadStream(localPath);
@@ -411,7 +411,7 @@ ${escapeHtml(photoCaption)}`
                 });
               } finally { await cleanTemp(localPath); }
             } else {
-              // Multi-photo album â€” download all and send as media group
+              // Multi-photo album Ã¢â‚¬â€ download all and send as media group
               const localPaths: string[] = [];
               try {
                 for (const u of buf.urls) {
@@ -456,11 +456,11 @@ ${escapeHtml(photoCaption)}`
         );
 
         // Peek: if childnumber === 0 and no existing buffer, timer fires immediately
-        // (actually always deferred 600ms â€” that's fine)
+        // (actually always deferred 600ms Ã¢â‚¬â€ that's fine)
         return;
       }
 
-      // â”€â”€ 2b. Doodle (sketch/drawing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 2b. Doodle (sketch/drawing) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.DOODLE) {
         const url = media.href || media.thumb;
         if (!url) { console.warn('[ZaloHandler] Doodle: no URL'); return; }
@@ -494,7 +494,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 4. File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 4. File Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.FILE) {
         const url = media.href;
         // title holds the original filename (e.g. "report.pdf")
@@ -516,7 +516,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 5. Video â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 5. Video Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.VIDEO) {
         const url = media.href;
         if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', media); return; }
@@ -529,7 +529,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 6. Voice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 6. Voice Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.VOICE) {
         const url = media.href;
         if (!url) { console.warn('[ZaloHandler] Voice: no URL found in content:', media); return; }
@@ -543,7 +543,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 7. Sticker â€“ fetch real URL via getStickersDetail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 7. Sticker Ã¢â‚¬â€œ fetch real URL via getStickersDetail Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.STICKER) {
         const stickerId = media.id;
         if (!stickerId) {
@@ -565,7 +565,7 @@ ${escapeHtml(photoCaption)}`
           try {
             let sent: { message_id: number };
             try {
-              // Try native TG sticker (webp â‰¤512 KB displays as a proper sticker)
+              // Try native TG sticker (webp Ã¢â€°Â¤512 KB displays as a proper sticker)
               const stream = createReadStream(localPath);
               sent = await tgBot.telegram.sendSticker(
                 config.telegram.groupId,
@@ -623,10 +623,10 @@ ${escapeHtml(photoCaption)}`
                   width: 300, margin: 2,
                   color: { dark: '#000000ff', light: '#ffffffff' },
                 });
-                let caption = `ðŸ¦ <b>TÃ i khoáº£n ngÃ¢n hÃ ng</b>`;
-                if (info.bankName)      caption += `\nNgÃ¢n hÃ ng: <b>${info.bankName}</b>`;
+                let caption = `Ã°Å¸ÂÂ¦ <b>TÃƒÂ i khoÃ¡ÂºÂ£n ngÃƒÂ¢n hÃƒÂ ng</b>`;
+                if (info.bankName)      caption += `\nNgÃƒÂ¢n hÃƒÂ ng: <b>${info.bankName}</b>`;
                 if (info.accountNumber) caption += `\nSTK: <code>${info.accountNumber}</code>`;
-                if (info.holderName)    caption += `\nChá»§ TK: <b>${info.holderName}</b>`;
+                if (info.holderName)    caption += `\nChÃ¡Â»Â§ TK: <b>${info.holderName}</b>`;
                 const fullCaption = type === ThreadType.Group
                   ? `${groupCaption(senderName)}\n${caption}`
                   : caption;
@@ -657,15 +657,15 @@ ${escapeHtml(photoCaption)}`
             else if (en && en.trim()) label = en.trim();
           }
         } catch { /* use fallback */ }
-        if (!label) label = '[Ná»™i dung web]';
+        if (!label) label = '[NÃ¡Â»â„¢i dung web]';
 
         const ACTION_ICONS: Record<string, string> = {
-          'zinstant.bankcard': 'ðŸ¦',
-          'zinstant.transfer': 'ðŸ’¸',
-          'zinstant.invoice':  'ðŸ§¾',
-          'zinstant.qr':       'ðŸ“·',
+          'zinstant.bankcard': 'Ã°Å¸ÂÂ¦',
+          'zinstant.transfer': 'Ã°Å¸â€™Â¸',
+          'zinstant.invoice':  'Ã°Å¸Â§Â¾',
+          'zinstant.qr':       'Ã°Å¸â€œÂ·',
         };
-        const icon = ACTION_ICONS[media.action ?? ''] ?? '📋';
+        const icon = ACTION_ICONS[media.action ?? ''] ?? 'ðŸ“‹';
         const href = media.href;
         if (!href) console.warn('[ZaloHandler] Webcontent has no href:', JSON.stringify({ action: media.action, title: media.title, params: media.params?.slice(0, 300) }));
 
@@ -707,7 +707,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 10. Location â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 10. Location Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.LOCATION) {
         let lat: number | undefined;
         let lng: number | undefined;
@@ -718,7 +718,7 @@ ${escapeHtml(photoCaption)}`
         } catch { /* ignore */ }
 
         if (lat !== undefined && lng !== undefined) {
-          // Send as native TG location â€” shows map preview with Maps button
+          // Send as native TG location Ã¢â‚¬â€ shows map preview with Maps button
           const sent = await tgBot.telegram.sendLocation(
             config.telegram.groupId,
             lat,
@@ -729,7 +729,7 @@ ${escapeHtml(photoCaption)}`
             // Send sender name as a follow-up caption since sendLocation has no HTML caption
             await tgBot.telegram.sendMessage(
               config.telegram.groupId,
-              `${groupCaption(senderName)}ðŸ“ Vá»‹ trÃ­`,
+              `${groupCaption(senderName)}Ã°Å¸â€œÂ VÃ¡Â»â€¹ trÃƒÂ­`,
               { ...tgBase, parse_mode: 'HTML' },
             );
           }
@@ -737,7 +737,7 @@ ${escapeHtml(photoCaption)}`
         } else {
           // Fallback: Google Maps link
           const mapsUrl = media.href || '#';
-          const body    = `ðŸ“ <a href="${mapsUrl}">Vá»‹ trÃ­</a>`;
+          const body    = `Ã°Å¸â€œÂ <a href="${mapsUrl}">VÃ¡Â»â€¹ trÃƒÂ­</a>`;
           const text    = type === ThreadType.Group ? `${groupCaption(senderName)}\n${body}` : body;
           const sent    = await tgBot.telegram.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
           saveTgMapping(sent);
@@ -745,7 +745,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ 11. Poll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 11. Poll Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.POLL) {
         let pollId: number | undefined;
         let question = '';
@@ -786,16 +786,16 @@ ${escapeHtml(photoCaption)}`
           if (options.length < 2) {
             // Can't create TG poll with < 2 options, send as text
             const text = type === ThreadType.Group
-              ? `${groupCaption(senderName)}ðŸ“Š <b>${escapeHtml(question)}</b>\n<i>Cuá»™c bÃ¬nh chá»n má»›i (${options.length} lá»±a chá»n)</i>`
-              : `ðŸ“Š <b>${escapeHtml(question)}</b>`;
+              ? `${groupCaption(senderName)}Ã°Å¸â€œÅ  <b>${escapeHtml(question)}</b>\n<i>CuÃ¡Â»â„¢c bÃƒÂ¬nh chÃ¡Â»Ân mÃ¡Â»â€ºi (${options.length} lÃ¡Â»Â±a chÃ¡Â»Ân)</i>`
+              : `Ã°Å¸â€œÅ  <b>${escapeHtml(question)}</b>`;
             const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
             saveTgMapping(sent);
             return;
           }
 
           const header = type === ThreadType.Group
-            ? `${senderName} táº¡o bÃ¬nh chá»n`
-            : 'BÃ¬nh chá»n má»›i';
+            ? `${senderName} tÃ¡ÂºÂ¡o bÃƒÂ¬nh chÃ¡Â»Ân`
+            : 'BÃƒÂ¬nh chÃ¡Â»Ân mÃ¡Â»â€ºi';
 
           const tgPollMsg = await tgBot.telegram.sendPoll(
             config.telegram.groupId,
@@ -828,14 +828,14 @@ ${escapeHtml(photoCaption)}`
           });
           saveTgMapping(tgPollMsg);
         } else {
-          // â”€â”€ Vote update (or unknown existing poll after restart) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+          // Ã¢â€â‚¬Ã¢â€â‚¬ Vote update (or unknown existing poll after restart) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
           // Small delay so Zalo server has time to record the vote before we fetch
           await new Promise(r => setTimeout(r, 800));
           let updatedDetail = pollDetail;
           try { updatedDetail = await api.getPollDetail(pollId); } catch { /* use existing */ }
           const header = type === ThreadType.Group
-            ? `${senderName} vá»«a bÃ¬nh chá»n`
-            : 'Cáº­p nháº­t bÃ¬nh chá»n';
+            ? `${senderName} vÃ¡Â»Â«a bÃƒÂ¬nh chÃ¡Â»Ân`
+            : 'CÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t bÃƒÂ¬nh chÃ¡Â»Ân';
           const detailOptions = updatedDetail?.options ?? [];
           const scoreText = buildScoreText(
             header,
@@ -855,7 +855,7 @@ ${escapeHtml(photoCaption)}`
                   parse_mode: 'HTML',
                   reply_markup: updatedDetail?.closed
                     ? { inline_keyboard: [] }
-                    : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] },
+                    : { inline_keyboard: [[{ text: 'Ã°Å¸â€â€™ KhoÃƒÂ¡ bÃƒÂ¬nh chÃ¡Â»Ân', callback_data: `lock_poll:${pollId}` }]] },
                 },
               );
               console.log(`[ZaloHandler] Poll ${pollId} score message edited OK`);
@@ -870,7 +870,7 @@ ${escapeHtml(photoCaption)}`
               pollStore.updateScoreMsg(pollId, newScore.message_id);
             }
           } else {
-            // existingEntry lost (bot restarted) â€” just send score as standalone message
+            // existingEntry lost (bot restarted) Ã¢â‚¬â€ just send score as standalone message
             const sent = await tgBot.telegram.sendMessage(
               config.telegram.groupId,
               scoreText,
@@ -882,7 +882,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // â”€â”€ Fallback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ Fallback Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       // Before fallback: detect contact card by content shape (contactUid field)
       // Zalo sends contact cards as msgType 'chat.forward' with contactUid in content
       {
@@ -910,7 +910,7 @@ ${escapeHtml(photoCaption)}`
               ? String((rawContent as Record<string, unknown>).qrCodeUrl)
               : media.qrCodeUrl;
 
-          const body = `ðŸ‘¤ <b>Danh thiáº¿p</b>\nTÃªn: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
+          const body = `Ã°Å¸â€˜Â¤ <b>Danh thiÃ¡ÂºÂ¿p</b>\nTÃƒÂªn: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
           const fullText = type === ThreadType.Group ? `${groupCaption(senderName)}\n${body}` : body;
 
           if (qrUrl) {
@@ -951,7 +951,7 @@ ${escapeHtml(photoCaption)}`
     }
   });
 
-  // â”€â”€ Undo (thu há»“i tin nháº¯n) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Undo (thu hÃ¡Â»â€œi tin nhÃ¡ÂºÂ¯n) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('undo', async (undo: any) => {
     try {
@@ -979,7 +979,7 @@ ${escapeHtml(photoCaption)}`
       // Notify in topic
       await tgBot.telegram.sendMessage(
         config.telegram.groupId,
-        `<i>ðŸ—‘ Tin nháº¯n Ä‘Ã£ Ä‘Æ°á»£c thu há»“i</i>`,
+        `<i>Ã°Å¸â€”â€˜ Tin nhÃ¡ÂºÂ¯n Ã„â€˜ÃƒÂ£ Ã„â€˜Ã†Â°Ã¡Â»Â£c thu hÃ¡Â»â€œi</i>`,
         { message_thread_id: topicId, parse_mode: 'HTML' },
       );
     } catch (err) {
@@ -987,7 +987,7 @@ ${escapeHtml(photoCaption)}`
     }
   });
 
-  // â”€â”€ Reaction (cáº£m xÃºc) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Reaction (cÃ¡ÂºÂ£m xÃƒÂºc) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   const REACTION_EMOJI: Record<string, string> = {
     '/-heart':   '\u2764\ufe0f',
     '/-strong':  '\ud83d\udc4d',
@@ -1030,9 +1030,9 @@ ${escapeHtml(photoCaption)}`
     try {
       const data = reaction?.data;
       const rIcon: string = data?.content?.rIcon ?? '';
-      const emoji = REACTION_EMOJI[rIcon] ?? '💬';
+      const emoji = REACTION_EMOJI[rIcon] ?? 'ðŸ’¬';
 
-      // If empty reaction icon â†’ user removed reaction; skip notification
+      // If empty reaction icon Ã¢â€ â€™ user removed reaction; skip notification
       if (!rIcon) return;
 
       const gMsgIds: Array<{ gMsgID?: string | number }> = data?.content?.rMsg ?? [];
@@ -1051,7 +1051,7 @@ ${escapeHtml(photoCaption)}`
       }
 
       const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
-      const dName = data?.dName ?? data?.uidFrom ?? 'ai đó';
+      const dName = data?.dName ?? data?.uidFrom ?? 'ai Ä‘Ã³';
       const text = tgMsgId === undefined
         ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message`
         : `${emoji} <b>${escapeHtml(dName)}</b>`;
@@ -1081,7 +1081,7 @@ ${escapeHtml(photoCaption)}`
     }
   });
 
-  // â”€â”€ Group events (vÃ o/rá»i nhÃ³m) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Group events (vÃƒÂ o/rÃ¡Â»Âi nhÃƒÂ³m) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('group_event', async (event: any) => {
     try {
@@ -1090,7 +1090,7 @@ ${escapeHtml(photoCaption)}`
       const groupId = String(event?.threadId ?? data?.groupId ?? '');
       if (!groupId) return;
 
-      // â”€â”€ Poll vote: UPDATE_BOARD with BoardType.Poll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ Poll vote: UPDATE_BOARD with BoardType.Poll Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (type === 'update_board' || type === 'remove_board') {
         // groupTopic.params is a JSON string containing poll info
         const rawParams = data?.groupTopic?.params ?? data?.topic?.params ?? '';
@@ -1107,7 +1107,7 @@ ${escapeHtml(photoCaption)}`
             try { detail = await api.getPollDetail(pollId); } catch { /* ignore */ }
             if (detail?.options) {
               const actorName = data?.updateMembers?.[0]?.dName ?? data?.creatorId ?? '';
-              const header = actorName ? `${actorName} vá»«a bÃ¬nh chá»n` : 'Cáº­p nháº­t bÃ¬nh chá»n';
+              const header = actorName ? `${actorName} vÃ¡Â»Â«a bÃƒÂ¬nh chÃ¡Â»Ân` : 'CÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t bÃƒÂ¬nh chÃ¡Â»Ân';
               const scoreText = buildScoreText(header, detail.options, detail.closed ?? false);
               console.log(`[ZaloHandler] Poll ${pollId} update:`, detail.options.map((o: { content: string; votes: number }) => `${o.content}=${o.votes}`).join(', '));
               try {
@@ -1120,7 +1120,7 @@ ${escapeHtml(photoCaption)}`
                     parse_mode: 'HTML',
                     reply_markup: detail.closed
                       ? { inline_keyboard: [] }
-                      : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] },
+                      : { inline_keyboard: [[{ text: 'Ã°Å¸â€â€™ KhoÃƒÂ¡ bÃƒÂ¬nh chÃ¡Â»Ân', callback_data: `lock_poll:${pollId}` }]] },
                   },
                 );
               } catch {
@@ -1131,7 +1131,7 @@ ${escapeHtml(photoCaption)}`
                     reply_parameters: { message_id: entry.tgPollMsgId, allow_sending_without_reply: true },
                     reply_markup: detail.closed
                       ? { inline_keyboard: [] }
-                      : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] } },
+                      : { inline_keyboard: [[{ text: 'Ã°Å¸â€â€™ KhoÃƒÂ¡ bÃƒÂ¬nh chÃ¡Â»Ân', callback_data: `lock_poll:${pollId}` }]] } },
                 );
                 pollStore.updateScoreMsg(pollId, newScore.message_id);
               }
@@ -1143,7 +1143,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      // Only notify for join/leave/remove â€” skip setting changes, pins, etc.
+      // Only notify for join/leave/remove Ã¢â‚¬â€ skip setting changes, pins, etc.
       const NOTIFY_TYPES = new Set(['join', 'leave', 'remove_member', 'block_member']);
       if (!type || !NOTIFY_TYPES.has(type)) return;
 
@@ -1157,13 +1157,13 @@ ${escapeHtml(photoCaption)}`
 
       let notifText = '';
       if (type === 'join') {
-        notifText = `âž• <b>${escapeHtml(names)}</b> Ä‘Ã£ tham gia nhÃ³m`;
+        notifText = `Ã¢Å¾â€¢ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ tham gia nhÃƒÂ³m`;
       } else if (type === 'leave') {
-        notifText = `âž– <b>${escapeHtml(names)}</b> Ä‘Ã£ rá»i nhÃ³m`;
+        notifText = `Ã¢Å¾â€“ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ rÃ¡Â»Âi nhÃƒÂ³m`;
       } else if (type === 'remove_member') {
-        notifText = `ðŸš« <b>${escapeHtml(names)}</b> Ä‘Ã£ bá»‹ xÃ³a khá»i nhÃ³m`;
+        notifText = `Ã°Å¸Å¡Â« <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ bÃ¡Â»â€¹ xÃƒÂ³a khÃ¡Â»Âi nhÃƒÂ³m`;
       } else if (type === 'block_member') {
-        notifText = `ðŸ”’ <b>${escapeHtml(names)}</b> Ä‘Ã£ bá»‹ cháº·n khá»i nhÃ³m`;
+        notifText = `Ã°Å¸â€â€™ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ bÃ¡Â»â€¹ chÃ¡ÂºÂ·n khÃ¡Â»Âi nhÃƒÂ³m`;
       }
 
       if (!notifText) return;
@@ -1179,4 +1179,5 @@ ${escapeHtml(photoCaption)}`
     }
   });
 }
+
 
