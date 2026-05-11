@@ -128,7 +128,6 @@ export async function downloadSocialVideo(url: string): Promise<string[]> {
     '-m', 'yt_dlp',
     '--no-playlist',
     '--no-warnings',
-    '--max-filesize', String(MAX_BYTES),
     '-f', 'b[ext=mp4][acodec!=none][vcodec^=h264]/b[ext=mp4][acodec!=none]/bv*+ba/b',
     '--merge-output-format', 'mp4',
     '-o', outTpl,
