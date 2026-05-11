@@ -9,6 +9,7 @@ import { store } from '../store.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
+import { extractTikTokUrl, canProcessTikTok, downloadTikTokVideo } from '../utils/tiktok.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 
@@ -371,6 +372,37 @@ export function setupZaloHandler(api: ZaloAPI): void {
         );
         saveTgMapping(sent);
         console.log(`[Zalo→TG] Text sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
+
+        const tiktokUrl = extractTikTokUrl(body);
+        if (tiktokUrl && canProcessTikTok(`${type}:${zaloId}`)) {
+          void (async () => {
+            let localPath: string | undefined;
+            try {
+              console.log(`[TikTok] Downloading ${tiktokUrl}`);
+              localPath = await downloadTikTokVideo(tiktokUrl);
+              const result = await api.sendMessage(
+                {
+                  msg: 'TikTok video preview từ link đã gửi',
+                  attachments: [localPath],
+                },
+                zaloId,
+                type,
+              );
+              console.log('[TikTok] Reposted video to Zalo OK:', JSON.stringify(result ?? {}));
+            } catch (err) {
+              console.error('[TikTok] Auto repost failed:', err);
+              try {
+                await api.sendMessage(
+                  { msg: 'Không tải được video TikTok từ link này.' },
+                  zaloId,
+                  type,
+                );
+              } catch { /* ignore */ }
+            } finally {
+              if (localPath) await cleanTemp(localPath);
+            }
+          })();
+        }
         return;
       }
 
