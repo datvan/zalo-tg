@@ -989,39 +989,40 @@ ${escapeHtml(photoCaption)}`
 
   // â”€â”€ Reaction (cáº£m xÃºc) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const REACTION_EMOJI: Record<string, string> = {
-    '/-heart':   'â¤ï¸',
-    '/-strong':  'ðŸ‘',
-    ':>':        'ðŸ˜„',
-    ':o':        'ðŸ˜®',
-    ':-((':      'ðŸ˜¢',
-    ':-h':       'ðŸ˜¡',
-    ':-*':       'ðŸ˜˜',
-    ":')":       'ðŸ˜‚',
-    '/-shit':    'ðŸ’©',
-    '/-rose':    'ðŸŒ¹',
-    '/-break':   'ðŸ’”',
-    '/-weak':    'ðŸ‘Ž',
-    ';xx':       'ðŸ¥°',
-    ';-/':       'ðŸ˜•',
-    ';-)':       'ðŸ˜‰',
-    '/-fade':    'âœ¨',
-    '/-ok':      'ðŸ‘Œ',
-    '/-v':       'âœŒï¸',
-    '/-thanks':  'ðŸ™',
-    '/-punch':   'ðŸ‘Š',
-    '/-no':      'ðŸ™…',
-    '/-loveu':   'ðŸ¤Ÿ',
-    '--b':       'ðŸ˜ž',
-    ':((': 'ðŸ˜­',
-    'x-)':       'ðŸ˜Ž',
-    '_()_':      'ðŸ™',
-    '/-bd':      'ðŸŽ‚',
-    '/-bome':    'ðŸ’£',
-    '/-beer':    'ðŸº',
-    '/-li':      'â˜€ï¸',
-    '/-share':   'ðŸ”',
-    '/-bad':     'ðŸ˜¤',
-    '':          'âŒ',  // remove reaction
+    '/-heart':   '\u2764\ufe0f',
+    '/-strong':  '\ud83d\udc4d',
+    ':>':        '\ud83d\ude04',
+    ':o':        '\ud83d\ude2e',
+    ':-(( ':     '\ud83d\ude22',
+    ':-((':      '\ud83d\ude22',
+    ':-h':       '\ud83d\ude21',
+    ':-*':       '\ud83d\ude18',
+    ":')":       '\ud83d\ude02',
+    '/-shit':    '\ud83d\udca9',
+    '/-rose':    '\ud83c\udf39',
+    '/-break':   '\ud83d\udc94',
+    '/-weak':    '\ud83d\udc4e',
+    ';xx':       '\ud83e\udd70',
+    ';-/':       '\ud83d\ude15',
+    ';-)':       '\ud83d\ude09',
+    '/-fade':    '\u2728',
+    '/-ok':      '\ud83d\udc4c',
+    '/-v':       '\u270c\ufe0f',
+    '/-thanks':  '\ud83d\ude4f',
+    '/-punch':   '\ud83d\udc4a',
+    '/-no':      '\ud83d\ude45',
+    '/-loveu':   '\ud83e\udd1f',
+    '--b':       '\ud83d\ude1e',
+    ':((':       '\ud83d\ude2d',
+    'x-)':       '\ud83d\ude0e',
+    '_()_':      '\ud83d\ude4f',
+    '/-bd':      '\ud83c\udf82',
+    '/-bome':    '\ud83d\udca3',
+    '/-beer':    '\ud83c\udf7a',
+    '/-li':      '\u2600\ufe0f',
+    '/-share':   '\ud83d\udd01',
+    '/-bad':     '\ud83d\ude24',
+    '':          '\u274c',
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1029,7 +1030,7 @@ ${escapeHtml(photoCaption)}`
     try {
       const data = reaction?.data;
       const rIcon: string = data?.content?.rIcon ?? '';
-      const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
+      const emoji = REACTION_EMOJI[rIcon] ?? '💬';
 
       // If empty reaction icon â†’ user removed reaction; skip notification
       if (!rIcon) return;
@@ -1052,8 +1053,7 @@ ${escapeHtml(photoCaption)}`
       const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
       const dName = data?.dName ?? data?.uidFrom ?? 'ai đó';
       const text = tgMsgId === undefined
-        ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message` + `
-<code>${escapeHtml(zaloMsgId)}</code>`
+        ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message`
         : `${emoji} <b>${escapeHtml(dName)}</b>`;
 
       if (tgMsgId === undefined) {
