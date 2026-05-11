@@ -354,6 +354,31 @@ export function setupZaloHandler(api: ZaloAPI): void {
 
       const { text, media } = parseContent(msg.data.content);
 
+      const maybeAutoRepostTikTok = (rawUrl: string | undefined, source: string) => {
+        if (!rawUrl) return;
+        const tiktokUrl = extractTikTokUrl(rawUrl);
+        if (!tiktokUrl || !canProcessTikTok(`${type}:${zaloId}`)) return;
+        void (async () => {
+          let localPath: string | undefined;
+          try {
+            console.log(`[TikTok] Downloading from ${source}: ${tiktokUrl}`);
+            localPath = await downloadTikTokVideo(tiktokUrl);
+            const result = await api.sendMessage(
+              { msg: 'TikTok video preview từ link đã gửi', attachments: [localPath] },
+              zaloId,
+              type,
+            );
+            console.log('[TikTok] Reposted video to Zalo OK:', JSON.stringify(result ?? {}));
+          } catch (err) {
+            console.error('[TikTok] Auto repost failed:', err);
+            try { await api.sendMessage({ msg: 'Không tải được video TikTok từ link này.' }, zaloId, type); }
+            catch { /* ignore */ }
+          } finally {
+            if (localPath) await cleanTemp(localPath);
+          }
+        })();
+      };
+
       // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Plain text Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.TEXT || (text !== null)) {
         const body = text ?? (typeof msg.data.content === 'string' ? msg.data.content : '');
@@ -373,36 +398,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
         saveTgMapping(sent);
         console.log(`[Zalo→TG] Text sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
 
-        const tiktokUrl = extractTikTokUrl(body);
-        if (tiktokUrl && canProcessTikTok(`${type}:${zaloId}`)) {
-          void (async () => {
-            let localPath: string | undefined;
-            try {
-              console.log(`[TikTok] Downloading ${tiktokUrl}`);
-              localPath = await downloadTikTokVideo(tiktokUrl);
-              const result = await api.sendMessage(
-                {
-                  msg: 'TikTok video preview từ link đã gửi',
-                  attachments: [localPath],
-                },
-                zaloId,
-                type,
-              );
-              console.log('[TikTok] Reposted video to Zalo OK:', JSON.stringify(result ?? {}));
-            } catch (err) {
-              console.error('[TikTok] Auto repost failed:', err);
-              try {
-                await api.sendMessage(
-                  { msg: 'Không tải được video TikTok từ link này.' },
-                  zaloId,
-                  type,
-                );
-              } catch { /* ignore */ }
-            } finally {
-              if (localPath) await cleanTemp(localPath);
-            }
-          })();
-        }
+        maybeAutoRepostTikTok(body, 'text');
         return;
       }
 
@@ -658,6 +654,7 @@ ${escapeHtml(photoCaption)}`
           link_preview_options: { is_disabled: false },
         });
         saveTgMapping(sent);
+        maybeAutoRepostTikTok(href, 'link');
         return;
       }
 
