@@ -1232,13 +1232,13 @@ ${escapeHtml(photoCaption)}`
 
       let notifText = '';
       if (type === 'join') {
-        notifText = `Ã¢Å¾â€¢ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ tham gia nhÃƒÂ³m`;
+        notifText = `\u2795 <b>${escapeHtml(names)}</b> \u0111\u00e3 tham gia nh\u00f3m`;
       } else if (type === 'leave') {
-        notifText = `Ã¢Å¾â€“ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ rÃ¡Â»Âi nhÃƒÂ³m`;
+        notifText = `\u2796 <b>${escapeHtml(names)}</b> \u0111\u00e3 r\u1eddi nh\u00f3m`;
       } else if (type === 'remove_member') {
-        notifText = `Ã°Å¸Å¡Â« <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ bÃ¡Â»â€¹ xÃƒÂ³a khÃ¡Â»Âi nhÃƒÂ³m`;
+        notifText = `\ud83d\udeab <b>${escapeHtml(names)}</b> \u0111\u00e3 b\u1ecb x\u00f3a kh\u1ecfi nh\u00f3m`;
       } else if (type === 'block_member') {
-        notifText = `Ã°Å¸â€â€™ <b>${escapeHtml(names)}</b> Ã„â€˜ÃƒÂ£ bÃ¡Â»â€¹ chÃ¡ÂºÂ·n khÃ¡Â»Âi nhÃƒÂ³m`;
+        notifText = `\ud83d\udd12 <b>${escapeHtml(names)}</b> \u0111\u00e3 b\u1ecb ch\u1eb7n kh\u1ecfi nh\u00f3m`;
       }
 
       if (!notifText) return;
