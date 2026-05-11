@@ -9,7 +9,7 @@ import { store } from '../store.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
-import { extractSocialVideoUrl, canProcessSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 
@@ -357,10 +357,10 @@ export function setupZaloHandler(api: ZaloAPI): void {
       const maybeAutoRepostSocialVideo = (rawUrl: string | undefined, source: string) => {
         if (!rawUrl) return;
         const videoUrl = extractSocialVideoUrl(rawUrl);
-        if (!videoUrl || !canProcessSocialVideo(`${type}:${zaloId}`)) return;
-        void (async () => {
+        if (!videoUrl) return;
+        const label = socialVideoLabel(videoUrl);
+        void enqueueSocialVideo(`${type}:${zaloId}`, `${label}:${source}`, async () => {
           let localPaths: string[] = [];
-          const label = socialVideoLabel(videoUrl);
           try {
             console.log(`[SocialVideo] Downloading ${label} from ${source}: ${videoUrl}`);
             localPaths = await downloadSocialVideo(videoUrl);
@@ -396,7 +396,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
           } finally {
             for (const p of localPaths) await cleanTemp(p);
           }
-        })();
+        });
       };
 
       // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Plain text Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -1300,6 +1300,7 @@ ${escapeHtml(photoCaption)}`
     }
   });
 }
+
 
 
 

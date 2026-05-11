@@ -7,9 +7,17 @@ const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/\S+|youtube\.com\/\S+|youtu\.be\/\S+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/\S+|fb\.watch\/\S+)/i;
 const MAX_BYTES = 100 * 1024 * 1024;
 const TARGET_SEGMENT_BYTES = 90 * 1024 * 1024;
-const COOLDOWN_MS = 60_000;
+const MAX_QUEUE_PER_THREAD = 10;
 
-const lastByThread = new Map<string, number>();
+interface QueueItem<T> {
+  label: string;
+  run: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (err: unknown) => void;
+}
+
+const queues = new Map<string, QueueItem<unknown>[]>();
+let globalRunning = false;
 
 export function extractSocialVideoUrl(text: string): string | undefined {
   const match = text.match(SOCIAL_VIDEO_RE);
@@ -17,12 +25,36 @@ export function extractSocialVideoUrl(text: string): string | undefined {
   return match[0].replace(/[\])}>.,!?]+$/, '');
 }
 
-export function canProcessSocialVideo(threadKey: string): boolean {
-  const now = Date.now();
-  const last = lastByThread.get(threadKey) ?? 0;
-  if (now - last < COOLDOWN_MS) return false;
-  lastByThread.set(threadKey, now);
-  return true;
+function pumpQueues(): void {
+  if (globalRunning) return;
+  const entry = [...queues.entries()].find(([, q]) => q.length > 0);
+  if (!entry) return;
+  const [threadKey, queue] = entry;
+  const item = queue.shift()!;
+  if (queue.length === 0) queues.delete(threadKey);
+  globalRunning = true;
+  console.log(`[SocialVideo] Processing queued job: ${item.label}`);
+  item.run()
+    .then(item.resolve)
+    .catch(item.reject)
+    .finally(() => {
+      globalRunning = false;
+      pumpQueues();
+    });
+}
+
+export function enqueueSocialVideo<T>(threadKey: string, label: string, run: () => Promise<T>): Promise<T> {
+  const queue = queues.get(threadKey) ?? [];
+  if (queue.length >= MAX_QUEUE_PER_THREAD) {
+    return Promise.reject(new Error(`Social video queue full for ${threadKey}`));
+  }
+  queues.set(threadKey, queue);
+  const position = queue.length + (globalRunning ? 1 : 0) + 1;
+  console.log(`[SocialVideo] Queued ${label} for ${threadKey}; position ~${position}`);
+  return new Promise<T>((resolve, reject) => {
+    queue.push({ label, run, resolve: resolve as (value: unknown) => void, reject });
+    pumpQueues();
+  });
 }
 
 export function socialVideoLabel(url: string): string {

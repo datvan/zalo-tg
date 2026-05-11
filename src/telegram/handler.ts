@@ -7,7 +7,7 @@ import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, medi
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4 } from '../utils/media.js';
-import { extractSocialVideoUrl, canProcessSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 
@@ -563,10 +563,11 @@ export function setupTelegramHandler(
         // Skip bot commands that were already handled above
         if (msg.text.startsWith('/')) return;
         const socialVideoUrl = extractSocialVideoUrl(msg.text);
-        if (socialVideoUrl && canProcessSocialVideo(`tg:${threadType}:${zaloId}`)) {
+        if (socialVideoUrl) {
           let localPaths: string[] = [];
           const label = socialVideoLabel(socialVideoUrl);
           try {
+            await enqueueSocialVideo(`tg:${threadType}:${zaloId}`, `${label}:telegram`, async () => {
             console.log(`[TG→Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
             localPaths = await downloadSocialVideo(socialVideoUrl);
             for (let i = 0; i < localPaths.length; i++) {
@@ -589,6 +590,7 @@ export function setupTelegramHandler(
               }, zaloId, threadType);
               console.log(`[TG→Zalo][SocialVideo] Sent native video part ${i + 1}/${localPaths.length}`);
             }
+            });
           } catch (err) {
             await notifyError('socialVideo', err);
           } finally {
@@ -1304,5 +1306,6 @@ export function setupTelegramHandler(
 }
 
 // Called by setupTelegramHandler, but defined after so we can reference tgBot directly.
+
 
 
