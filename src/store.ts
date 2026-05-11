@@ -252,10 +252,27 @@ export interface SentMsgInfo {
   threadType: 0 | 1;
 }
 
-const SENT_MAX = 300;
-const _sentMap      = new Map<number, SentMsgInfo>(); // tgMsgId → info
-const _sentByZaloId = new Map<string, number>();       // String(zaloMsgId) → tgMsgId
-const _sentOrder: number[] = [];
+const SENT_MAX = 5000;
+const sentMapPath = path.resolve(config.dataDir, 'sent-message-map.json');
+
+type SentStoreDisk = Record<string, SentMsgInfo>;
+
+function loadSentMap(): SentStoreDisk {
+  if (!existsSync(sentMapPath)) return {};
+  try { return JSON.parse(readFileSync(sentMapPath, 'utf8')) as SentStoreDisk; }
+  catch { return {}; }
+}
+
+function persistSentMap(): void {
+  mkdirSync(path.dirname(sentMapPath), { recursive: true });
+  const obj = Object.fromEntries([..._sentMap.entries()].map(([k, v]) => [String(k), v]));
+  writeFileSync(sentMapPath, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+const _sentInitial  = loadSentMap();
+const _sentMap      = new Map<number, SentMsgInfo>(Object.entries(_sentInitial).map(([k, v]) => [Number(k), v])); // tgMsgId → info
+const _sentByZaloId = new Map<string, number>([..._sentMap.entries()].map(([tgMsgId, info]) => [String(info.msgId), tgMsgId])); // String(zaloMsgId) → tgMsgId
+const _sentOrder: number[] = [..._sentMap.keys()];
 
 export const sentMsgStore = {
   /** Record a message we sent from TG→Zalo. tgMsgId is the user's TG message. */
@@ -271,6 +288,7 @@ export const sentMsgStore = {
     _sentMap.set(tgMsgId, info);
     _sentByZaloId.set(String(info.msgId), tgMsgId);
     _sentOrder.push(tgMsgId);
+    persistSentMap();
   },
 
   get(tgMsgId: number): SentMsgInfo | undefined {
