@@ -363,12 +363,28 @@ export function setupZaloHandler(api: ZaloAPI): void {
           try {
             console.log(`[TikTok] Downloading from ${source}: ${tiktokUrl}`);
             localPath = await downloadTikTokVideo(tiktokUrl);
-            const result = await api.sendMessage(
-              { msg: 'TikTok video preview từ link đã gửi', attachments: [localPath] },
+            const uploaded = await api.uploadAttachment(localPath, zaloId, type) as Array<{
+              fileUrl?: string;
+              normalUrl?: string;
+              hdUrl?: string;
+              thumbUrl?: string;
+            }>;
+            console.log('[TikTok] Upload result:', JSON.stringify(uploaded[0] ?? {}));
+            const videoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+            const thumbnailUrl = uploaded[0]?.thumbUrl ?? videoUrl;
+            if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+            const result = await api.sendVideo(
+              {
+                videoUrl,
+                thumbnailUrl,
+                duration: 30_000,
+                width: 720,
+                height: 1280,
+              },
               zaloId,
               type,
             );
-            console.log('[TikTok] Reposted video to Zalo OK:', JSON.stringify(result ?? {}));
+            console.log('[TikTok] Reposted native video to Zalo OK:', JSON.stringify(result ?? {}));
           } catch (err) {
             console.error('[TikTok] Auto repost failed:', err);
             try { await api.sendMessage({ msg: 'Không tải được video TikTok từ link này.' }, zaloId, type); }
