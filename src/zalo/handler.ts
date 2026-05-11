@@ -265,6 +265,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
       const type       = msg.type as 0 | 1;
       const senderName = msg.data.dName ?? msg.data.uidFrom;
       const msgType    = msg.data.msgType ?? ZALO_MSG_TYPES.TEXT;
+      console.log('[Zalo→TG] Incoming:', JSON.stringify({ msgType, isSelf: msg.isSelf, uidFrom: msg.data.uidFrom, dName: msg.data.dName, msgId: msg.data.msgId, realMsgId: msg.data.realMsgId }));
 
       // Pre-populate member cache the first time we see a new group
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
@@ -1027,6 +1028,7 @@ ${escapeHtml(photoCaption)}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('reaction', async (reaction: any) => {
+    return;
     try {
       const data = reaction?.data;
       const rIcon: string = data?.content?.rIcon ?? '';
@@ -1073,7 +1075,7 @@ ${escapeHtml(photoCaption)}`
         {
           message_thread_id: topicId,
           parse_mode: 'HTML',
-          reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
+          reply_parameters: { message_id: tgMsgId!, allow_sending_without_reply: true },
         },
       );
     } catch (err) {
@@ -1179,6 +1181,8 @@ ${escapeHtml(photoCaption)}`
     }
   });
 }
+
+
 
 
 
