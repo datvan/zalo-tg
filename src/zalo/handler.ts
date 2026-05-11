@@ -224,6 +224,28 @@ function parseContent(raw: string | ZaloMediaContent | Record<string, unknown>):
   return { text: null, media: raw as ZaloMediaContent };
 }
 
+
+function pickMediaUrl(media: ZaloMediaContent): string | undefined {
+  const direct = media.href ?? (media as Record<string, unknown>).url ?? (media as Record<string, unknown>).fileUrl ??
+    (media as Record<string, unknown>).normalUrl ?? (media as Record<string, unknown>).hdUrl ??
+    (media as Record<string, unknown>).videoUrl;
+  if (typeof direct === 'string' && direct.length > 0) return direct;
+  if (!media.params) return undefined;
+  try {
+    const params = JSON.parse(media.params) as Record<string, unknown>;
+    for (const key of ['hdUrl', 'videoUrl', 'fileUrl', 'normalUrl', 'url', 'href', 'downloadUrl', 'src']) {
+      const value = params[key];
+      if (typeof value === 'string' && value.length > 0) return value;
+    }
+  } catch { /* ignore */ }
+  return undefined;
+}
+
+function shortContent(raw: unknown): string {
+  try { return JSON.stringify(raw).slice(0, 800); }
+  catch { return String(raw).slice(0, 800); }
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Poll helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 import type { PollOptions } from 'zca-js';
@@ -348,6 +370,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
           { ...tgBase, parse_mode: 'HTML' },
         );
         saveTgMapping(sent);
+        console.log(`[Zalo→TG] Text sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
         return;
       }
 
@@ -519,13 +542,14 @@ ${escapeHtml(photoCaption)}`
 
       // Ã¢â€â‚¬Ã¢â€â‚¬ 5. Video Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msgType === ZALO_MSG_TYPES.VIDEO) {
-        const url = media.href;
-        if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', media); return; }
+        const url = pickMediaUrl(media);
+        if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', shortContent(msg.data.content)); return; }
         const localPath = await downloadToTemp(url, `video_${Date.now()}.mp4`);
         const stream = createReadStream(localPath);
         try {
           const sent = await tgBot.telegram.sendVideo(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
+          console.log(`[Zalo→TG] Video sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
         } finally { await cleanTemp(localPath); }
         return;
       }
