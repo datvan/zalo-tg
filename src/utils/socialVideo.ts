@@ -100,9 +100,10 @@ async function splitForZalo(inputPath: string, firstNormalizedPath: string): Pro
   if (firstSize <= MAX_BYTES) return [firstNormalizedPath];
 
   await cleanTemp(firstNormalizedPath);
-  const duration = Math.min(300, await probeDurationSeconds(inputPath));
+  const duration = await probeDurationSeconds(inputPath);
   const parts = Math.ceil(firstSize / TARGET_SEGMENT_BYTES);
   const segmentDuration = Math.ceil(duration / parts);
+  console.log(`[SocialVideo] Splitting ${Math.round(duration)}s video into ${parts} part(s), ${segmentDuration}s each`);
   const outputs: string[] = [];
   for (let i = 0; i < parts; i++) {
     const start = i * segmentDuration;
