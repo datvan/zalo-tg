@@ -4,19 +4,19 @@ import path from 'path';
 import { cleanTemp } from './media.js';
 
 const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
-const TIKTOK_RE = /https?:\/\/(?:www\.|vt\.|vm\.|m\.)?tiktok\.com\/\S+/i;
+const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/\S+|youtube\.com\/\S+|youtu\.be\/\S+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/\S+|fb\.watch\/\S+)/i;
 const MAX_BYTES = 50 * 1024 * 1024;
 const COOLDOWN_MS = 60_000;
 
 const lastByThread = new Map<string, number>();
 
-export function extractTikTokUrl(text: string): string | undefined {
-  const match = text.match(TIKTOK_RE);
+export function extractSocialVideoUrl(text: string): string | undefined {
+  const match = text.match(SOCIAL_VIDEO_RE);
   if (!match) return undefined;
   return match[0].replace(/[\])}>.,!?]+$/, '');
 }
 
-export function canProcessTikTok(threadKey: string): boolean {
+export function canProcessSocialVideo(threadKey: string): boolean {
   const now = Date.now();
   const last = lastByThread.get(threadKey) ?? 0;
   if (now - last < COOLDOWN_MS) return false;
@@ -24,8 +24,16 @@ export function canProcessTikTok(threadKey: string): boolean {
   return true;
 }
 
+export function socialVideoLabel(url: string): string {
+  const lower = url.toLowerCase();
+  if (lower.includes('tiktok.com')) return 'TikTok';
+  if (lower.includes('youtu.be') || lower.includes('youtube.com')) return 'YouTube';
+  if (lower.includes('facebook.com') || lower.includes('fb.watch')) return 'Facebook Reels';
+  return 'Social video';
+}
+
 async function normalizeForZalo(inputPath: string): Promise<string> {
-  const outputPath = path.join(TMP_DIR, `tiktok_zalo_${Date.now()}.mp4`);
+  const outputPath = path.join(TMP_DIR, `social_zalo_${Date.now()}.mp4`);
   await new Promise<void>((resolve, reject) => {
     const p = spawn('ffmpeg', [
       '-y', '-i', inputPath,
@@ -46,9 +54,9 @@ async function normalizeForZalo(inputPath: string): Promise<string> {
   return outputPath;
 }
 
-export async function downloadTikTokVideo(url: string): Promise<string> {
+export async function downloadSocialVideo(url: string): Promise<string> {
   mkdirSync(TMP_DIR, { recursive: true });
-  const outTpl = path.join(TMP_DIR, `tiktok_${Date.now()}.%(ext)s`);
+  const outTpl = path.join(TMP_DIR, `social_${Date.now()}.%(ext)s`);
   const args = [
     '-m', 'yt_dlp',
     '--no-playlist',
@@ -64,7 +72,7 @@ export async function downloadTikTokVideo(url: string): Promise<string> {
     const p = spawn('python', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     p.stderr.on('data', d => { stderr += String(d); });
-    p.on('close', code => code === 0 ? resolve() : reject(new Error(`yt-dlp exit ${code}: ${stderr.slice(0, 1000)}`)));
+    p.on('close', code => code === 0 ? resolve() : reject(new Error(`yt-dlp exit ${code}: ${stderr.slice(-4000)}`)));
     p.on('error', reject);
   });
 
@@ -75,7 +83,7 @@ export async function downloadTikTokVideo(url: string): Promise<string> {
     const size = statSync(outPath).size;
     if (size > MAX_BYTES) {
       await cleanTemp(outPath);
-      throw new Error(`TikTok video too large after normalize: ${size}`);
+      throw new Error(`Social video too large after normalize: ${size}`);
     }
     return outPath;
   } finally {

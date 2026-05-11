@@ -9,7 +9,7 @@ import { store } from '../store.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
-import { extractTikTokUrl, canProcessTikTok, downloadTikTokVideo } from '../utils/tiktok.js';
+import { extractSocialVideoUrl, canProcessSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 
@@ -354,28 +354,29 @@ export function setupZaloHandler(api: ZaloAPI): void {
 
       const { text, media } = parseContent(msg.data.content);
 
-      const maybeAutoRepostTikTok = (rawUrl: string | undefined, source: string) => {
+      const maybeAutoRepostSocialVideo = (rawUrl: string | undefined, source: string) => {
         if (!rawUrl) return;
-        const tiktokUrl = extractTikTokUrl(rawUrl);
-        if (!tiktokUrl || !canProcessTikTok(`${type}:${zaloId}`)) return;
+        const videoUrl = extractSocialVideoUrl(rawUrl);
+        if (!videoUrl || !canProcessSocialVideo(`${type}:${zaloId}`)) return;
         void (async () => {
           let localPath: string | undefined;
+          const label = socialVideoLabel(videoUrl);
           try {
-            console.log(`[TikTok] Downloading from ${source}: ${tiktokUrl}`);
-            localPath = await downloadTikTokVideo(tiktokUrl);
+            console.log(`[SocialVideo] Downloading ${label} from ${source}: ${videoUrl}`);
+            localPath = await downloadSocialVideo(videoUrl);
             const uploaded = await api.uploadAttachment(localPath, zaloId, type) as Array<{
               fileUrl?: string;
               normalUrl?: string;
               hdUrl?: string;
               thumbUrl?: string;
             }>;
-            console.log('[TikTok] Upload result:', JSON.stringify(uploaded[0] ?? {}));
-            const videoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
-            const thumbnailUrl = uploaded[0]?.thumbUrl ?? videoUrl;
-            if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+            console.log('[SocialVideo] Upload result:', JSON.stringify(uploaded[0] ?? {}));
+            const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+            const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
+            if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
             const result = await api.sendVideo(
               {
-                videoUrl,
+                videoUrl: nativeVideoUrl,
                 thumbnailUrl,
                 duration: 30_000,
                 width: 720,
@@ -384,10 +385,10 @@ export function setupZaloHandler(api: ZaloAPI): void {
               zaloId,
               type,
             );
-            console.log('[TikTok] Reposted native video to Zalo OK:', JSON.stringify(result ?? {}));
+            console.log('[SocialVideo] Reposted native video to Zalo OK:', JSON.stringify(result ?? {}));
           } catch (err) {
-            console.error('[TikTok] Auto repost failed:', err);
-            try { await api.sendMessage({ msg: 'Không tải được video TikTok từ link này.' }, zaloId, type); }
+            console.error('[SocialVideo] Auto repost failed:', err);
+            try { await api.sendMessage({ msg: 'Không tải được video từ link này.' }, zaloId, type); }
             catch { /* ignore */ }
           } finally {
             if (localPath) await cleanTemp(localPath);
@@ -414,7 +415,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
         saveTgMapping(sent);
         console.log(`[Zalo→TG] Text sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
 
-        maybeAutoRepostTikTok(body, 'text');
+        maybeAutoRepostSocialVideo(body, 'text');
         return;
       }
 
@@ -670,7 +671,7 @@ ${escapeHtml(photoCaption)}`
           link_preview_options: { is_disabled: false },
         });
         saveTgMapping(sent);
-        maybeAutoRepostTikTok(href, 'link');
+        maybeAutoRepostSocialVideo(href, 'link');
         return;
       }
 
