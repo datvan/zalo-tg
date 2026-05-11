@@ -39,7 +39,6 @@ async function normalizeForZalo(inputPath: string, suffix = ''): Promise<string>
     const p = spawn('ffmpeg', [
       '-y', '-i', inputPath,
       '-map', '0:v:0', '-map', '0:a:0?',
-      '-t', '300',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
       '-pix_fmt', 'yuv420p',
