@@ -782,6 +782,52 @@ ${escapeHtml(photoCaption)}`
       }
 
       // Ã¢â€â‚¬Ã¢â€â‚¬ 10. Location Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+      if (msgType === ZALO_MSG_TYPES.ECARD) {
+        let params: Record<string, unknown> | undefined;
+        try { params = media.params ? JSON.parse(media.params) as Record<string, unknown> : undefined; }
+        catch { params = undefined; }
+
+        const actionId = typeof params?.actionId === 'string' ? params.actionId : '';
+        const isReminder = actionId.includes('reminder') || media.action === 'show.profile';
+        const icon = isReminder ? '🗓' : '🧾';
+        const title = media.title || (typeof params?.notifyTxt === 'string' ? params.notifyTxt : undefined) || 'Zalo card';
+        const description = media.description || (typeof params?.previewTxt === 'string' ? params.previewTxt : undefined);
+        const href = media.href;
+        const lines = [
+          `${icon} ${escapeHtml(title)}`,
+          description ? escapeHtml(description) : undefined,
+          href ? escapeHtml(href) : undefined,
+        ].filter((v): v is string => Boolean(v));
+        const caption = type === ThreadType.Group ? `${groupCaption(senderName)}\n${lines.join('\n')}` : lines.join('\n');
+
+        if (media.thumb || media.href) {
+          const imageUrl = media.thumb || media.href;
+          try {
+            const localPath = await downloadToTemp(imageUrl!, `ecard_${Date.now()}.jpg`);
+            try {
+              const stream = createReadStream(localPath);
+              const sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, {
+                ...tgBase,
+                caption,
+                parse_mode: 'HTML',
+              });
+              saveTgMapping(sent);
+              return;
+            } finally { await cleanTemp(localPath); }
+          } catch (err) {
+            console.warn('[ZaloHandler] ecard thumbnail send failed:', err);
+          }
+        }
+
+        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, caption, {
+          ...tgBase,
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: false },
+        });
+        saveTgMapping(sent);
+        return;
+      }
+
       if (msgType === ZALO_MSG_TYPES.LOCATION) {
         let lat: number | undefined;
         let lng: number | undefined;

@@ -42,6 +42,7 @@ export const ZALO_MSG_TYPES = {
   GIF:        'chat.gif',
   LOCATION:   'chat.location.new',
   WEBCONTENT: 'chat.webcontent',
+  ECARD:      'chat.ecard',
   POLL:       'group.poll',
   // Contact card (shared profile) — Zalo sends as 'chat.forward' with msgType 6
   CONTACT:    'chat.forward',
