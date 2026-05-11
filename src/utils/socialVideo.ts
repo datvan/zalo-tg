@@ -5,8 +5,8 @@ import { cleanTemp } from './media.js';
 
 const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/\S+|youtube\.com\/\S+|youtu\.be\/\S+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/\S+|fb\.watch\/\S+)/i;
-const MAX_BYTES = 50 * 1024 * 1024;
-const TARGET_SEGMENT_BYTES = 45 * 1024 * 1024;
+const MAX_BYTES = 100 * 1024 * 1024;
+const TARGET_SEGMENT_BYTES = 90 * 1024 * 1024;
 const COOLDOWN_MS = 60_000;
 
 const lastByThread = new Map<string, number>();
@@ -156,4 +156,5 @@ export async function downloadSocialVideo(url: string): Promise<string[]> {
     for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
+
 
