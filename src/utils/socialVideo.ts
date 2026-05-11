@@ -1,4 +1,4 @@
-import { mkdirSync, statSync } from 'fs';
+import { mkdirSync, readdirSync, statSync } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { cleanTemp } from './media.js';
@@ -121,7 +121,9 @@ async function splitForZalo(inputPath: string, firstNormalizedPath: string): Pro
 
 export async function downloadSocialVideo(url: string): Promise<string[]> {
   mkdirSync(TMP_DIR, { recursive: true });
-  const outTpl = path.join(TMP_DIR, `social_${Date.now()}.%(ext)s`);
+  const jobId = Date.now();
+  const outBase = `social_${jobId}`;
+  const outTpl = path.join(TMP_DIR, `${outBase}.%(ext)s`);
   const args = [
     '-m', 'yt_dlp',
     '--no-playlist',
@@ -141,12 +143,17 @@ export async function downloadSocialVideo(url: string): Promise<string[]> {
     p.on('error', reject);
   });
 
-  const rawPath = outTpl.replace('%(ext)s', 'mp4');
+  const candidates = readdirSync(TMP_DIR)
+    .filter(name => name.startsWith(`${outBase}.`))
+    .map(name => path.join(TMP_DIR, name));
+  const rawPath = candidates.sort((a, b) => statSync(b).size - statSync(a).size)[0];
+  if (!rawPath) throw new Error(`yt-dlp did not create output for ${outBase}`);
+
   let outPath: string | undefined;
   try {
     outPath = await normalizeForZalo(rawPath);
     return await splitForZalo(rawPath, outPath);
   } finally {
-    await cleanTemp(rawPath);
+    for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
