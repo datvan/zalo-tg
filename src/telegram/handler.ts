@@ -7,6 +7,7 @@ import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, medi
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4 } from '../utils/media.js';
+import { extractSocialVideoUrl, canProcessSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 
@@ -561,6 +562,40 @@ export function setupTelegramHandler(
       if ('text' in msg && msg.text) {
         // Skip bot commands that were already handled above
         if (msg.text.startsWith('/')) return;
+        const socialVideoUrl = extractSocialVideoUrl(msg.text);
+        if (socialVideoUrl && canProcessSocialVideo(`tg:${threadType}:${zaloId}`)) {
+          let localPaths: string[] = [];
+          const label = socialVideoLabel(socialVideoUrl);
+          try {
+            console.log(`[TG→Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
+            localPaths = await downloadSocialVideo(socialVideoUrl);
+            for (let i = 0; i < localPaths.length; i++) {
+              const uploaded = await api.uploadAttachment(localPaths[i], zaloId, threadType) as Array<{
+                fileUrl?: string;
+                normalUrl?: string;
+                hdUrl?: string;
+                thumbUrl?: string;
+              }>;
+              console.log(`[TG→Zalo][SocialVideo] Upload result part ${i + 1}/${localPaths.length}:`, JSON.stringify(uploaded[0] ?? {}));
+              const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+              const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
+              if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+              await api.sendVideo({
+                videoUrl: nativeVideoUrl,
+                thumbnailUrl,
+                duration: 30_000,
+                width: 720,
+                height: 1280,
+              }, zaloId, threadType);
+              console.log(`[TG→Zalo][SocialVideo] Sent native video part ${i + 1}/${localPaths.length}`);
+            }
+          } catch (err) {
+            await notifyError('socialVideo', err);
+          } finally {
+            for (const lp of localPaths) await cleanTemp(lp);
+          }
+          return;
+        }
         console.log(`[TGâ†’Zalo] sendMessage â†’ zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
         // Look up Zalo quote data if this TG message is a reply
         const replyToMsgId = msg.reply_to_message?.message_id;
