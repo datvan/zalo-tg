@@ -30,7 +30,9 @@ async function normalizeForZalo(inputPath: string): Promise<string> {
     const p = spawn('ffmpeg', [
       '-y', '-i', inputPath,
       '-map', '0:v:0', '-map', '0:a:0?',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+      '-t', '300',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
       '-movflags', '+faststart',
@@ -38,7 +40,7 @@ async function normalizeForZalo(inputPath: string): Promise<string> {
     ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     p.stderr.on('data', d => { stderr += String(d); });
-    p.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(0, 1000)}`)));
+    p.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-4000)}`)));
     p.on('error', reject);
   });
   return outputPath;
@@ -52,7 +54,7 @@ export async function downloadTikTokVideo(url: string): Promise<string> {
     '--no-playlist',
     '--no-warnings',
     '--max-filesize', String(MAX_BYTES),
-    '-f', 'bv*+ba/b[ext=mp4]/b',
+    '-f', 'b[ext=mp4][acodec!=none][vcodec^=h264]/b[ext=mp4][acodec!=none]/bv*+ba/b',
     '--merge-output-format', 'mp4',
     '-o', outTpl,
     url,
