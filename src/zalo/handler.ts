@@ -359,39 +359,42 @@ export function setupZaloHandler(api: ZaloAPI): void {
         const videoUrl = extractSocialVideoUrl(rawUrl);
         if (!videoUrl || !canProcessSocialVideo(`${type}:${zaloId}`)) return;
         void (async () => {
-          let localPath: string | undefined;
+          let localPaths: string[] = [];
           const label = socialVideoLabel(videoUrl);
           try {
             console.log(`[SocialVideo] Downloading ${label} from ${source}: ${videoUrl}`);
-            localPath = await downloadSocialVideo(videoUrl);
-            const uploaded = await api.uploadAttachment(localPath, zaloId, type) as Array<{
-              fileUrl?: string;
-              normalUrl?: string;
-              hdUrl?: string;
-              thumbUrl?: string;
-            }>;
-            console.log('[SocialVideo] Upload result:', JSON.stringify(uploaded[0] ?? {}));
-            const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
-            const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
-            if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
-            const result = await api.sendVideo(
-              {
-                videoUrl: nativeVideoUrl,
-                thumbnailUrl,
-                duration: 30_000,
-                width: 720,
-                height: 1280,
-              },
-              zaloId,
-              type,
-            );
-            console.log('[SocialVideo] Reposted native video to Zalo OK:', JSON.stringify(result ?? {}));
+            localPaths = await downloadSocialVideo(videoUrl);
+            for (let i = 0; i < localPaths.length; i++) {
+              const partPath = localPaths[i];
+              const uploaded = await api.uploadAttachment(partPath, zaloId, type) as Array<{
+                fileUrl?: string;
+                normalUrl?: string;
+                hdUrl?: string;
+                thumbUrl?: string;
+              }>;
+              console.log(`[SocialVideo] Upload result part ${i + 1}/${localPaths.length}:`, JSON.stringify(uploaded[0] ?? {}));
+              const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+              const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
+              if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+              const result = await api.sendVideo(
+                {
+                  videoUrl: nativeVideoUrl,
+                  thumbnailUrl,
+                  duration: 30_000,
+                  width: 720,
+                  height: 1280,
+                },
+                zaloId,
+                type,
+              );
+              console.log(`[SocialVideo] Reposted native video part ${i + 1}/${localPaths.length} to Zalo OK:`, JSON.stringify(result ?? {}));
+            }
           } catch (err) {
             console.error('[SocialVideo] Auto repost failed:', err);
             try { await api.sendMessage({ msg: 'Không tải được video từ link này.' }, zaloId, type); }
             catch { /* ignore */ }
           } finally {
-            if (localPath) await cleanTemp(localPath);
+            for (const p of localPaths) await cleanTemp(p);
           }
         })();
       };

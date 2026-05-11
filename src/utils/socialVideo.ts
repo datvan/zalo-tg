@@ -6,6 +6,7 @@ import { cleanTemp } from './media.js';
 const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/\S+|youtube\.com\/\S+|youtu\.be\/\S+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/\S+|fb\.watch\/\S+)/i;
 const MAX_BYTES = 50 * 1024 * 1024;
+const TARGET_SEGMENT_BYTES = 45 * 1024 * 1024;
 const COOLDOWN_MS = 60_000;
 
 const lastByThread = new Map<string, number>();
@@ -32,8 +33,8 @@ export function socialVideoLabel(url: string): string {
   return 'Social video';
 }
 
-async function normalizeForZalo(inputPath: string): Promise<string> {
-  const outputPath = path.join(TMP_DIR, `social_zalo_${Date.now()}.mp4`);
+async function normalizeForZalo(inputPath: string, suffix = ''): Promise<string> {
+  const outputPath = path.join(TMP_DIR, `social_zalo_${Date.now()}${suffix}.mp4`);
   await new Promise<void>((resolve, reject) => {
     const p = spawn('ffmpeg', [
       '-y', '-i', inputPath,
@@ -54,7 +55,71 @@ async function normalizeForZalo(inputPath: string): Promise<string> {
   return outputPath;
 }
 
-export async function downloadSocialVideo(url: string): Promise<string> {
+async function probeDurationSeconds(inputPath: string): Promise<number> {
+  const out = await new Promise<string>((resolve, reject) => {
+    const p = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      inputPath,
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    p.stdout.on('data', d => { stdout += String(d); });
+    p.stderr.on('data', d => { stderr += String(d); });
+    p.on('close', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(`ffprobe exit ${code}: ${stderr.slice(-1000)}`)));
+    p.on('error', reject);
+  });
+  const duration = Number(out);
+  return Number.isFinite(duration) && duration > 0 ? duration : 300;
+}
+
+async function normalizeSegmentForZalo(inputPath: string, start: number, duration: number, idx: number): Promise<string> {
+  const outputPath = path.join(TMP_DIR, `social_zalo_${Date.now()}_part${idx}.mp4`);
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn('ffmpeg', [
+      '-y', '-ss', String(start), '-i', inputPath,
+      '-t', String(duration),
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+      '-movflags', '+faststart',
+      outputPath,
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    p.stderr.on('data', d => { stderr += String(d); });
+    p.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg segment exit ${code}: ${stderr.slice(-4000)}`)));
+    p.on('error', reject);
+  });
+  return outputPath;
+}
+
+async function splitForZalo(inputPath: string, firstNormalizedPath: string): Promise<string[]> {
+  const firstSize = statSync(firstNormalizedPath).size;
+  if (firstSize <= MAX_BYTES) return [firstNormalizedPath];
+
+  await cleanTemp(firstNormalizedPath);
+  const duration = Math.min(300, await probeDurationSeconds(inputPath));
+  const parts = Math.ceil(firstSize / TARGET_SEGMENT_BYTES);
+  const segmentDuration = Math.ceil(duration / parts);
+  const outputs: string[] = [];
+  for (let i = 0; i < parts; i++) {
+    const start = i * segmentDuration;
+    if (start >= duration) break;
+    const out = await normalizeSegmentForZalo(inputPath, start, Math.min(segmentDuration, duration - start), i + 1);
+    const size = statSync(out).size;
+    if (size > MAX_BYTES) {
+      await cleanTemp(out);
+      throw new Error(`Social video segment ${i + 1} too large after split: ${size}`);
+    }
+    outputs.push(out);
+  }
+  return outputs;
+}
+
+export async function downloadSocialVideo(url: string): Promise<string[]> {
   mkdirSync(TMP_DIR, { recursive: true });
   const outTpl = path.join(TMP_DIR, `social_${Date.now()}.%(ext)s`);
   const args = [
@@ -80,12 +145,7 @@ export async function downloadSocialVideo(url: string): Promise<string> {
   let outPath: string | undefined;
   try {
     outPath = await normalizeForZalo(rawPath);
-    const size = statSync(outPath).size;
-    if (size > MAX_BYTES) {
-      await cleanTemp(outPath);
-      throw new Error(`Social video too large after normalize: ${size}`);
-    }
-    return outPath;
+    return await splitForZalo(rawPath, outPath);
   } finally {
     await cleanTemp(rawPath);
   }
