@@ -106,13 +106,27 @@ export interface ZaloQuoteData {
   threadType: 0 | 1;
 }
 
-const MSG_CACHE_MAX = 600;
+const MSG_CACHE_MAX = 5000;
+const msgMapPath = path.resolve(config.dataDir, 'message-map.json');
+
+function loadMsgMap(): Record<string, number> {
+  if (!existsSync(msgMapPath)) return {};
+  try { return JSON.parse(readFileSync(msgMapPath, 'utf8')) as Record<string, number>; }
+  catch { return {}; }
+}
+
+function persistMsgMap(): void {
+  mkdirSync(path.dirname(msgMapPath), { recursive: true });
+  const obj = Object.fromEntries(_zaloToTg.entries());
+  writeFileSync(msgMapPath, JSON.stringify(obj, null, 2), 'utf8');
+}
+
 /** zaloMsgId → Telegram message_id (used to find TG reply target) */
-const _zaloToTg = new Map<string, number>();
+const _zaloToTg = new Map<string, number>(Object.entries(loadMsgMap()));
 /** Telegram message_id → Zalo quote data (used when TG user replies) */
 const _tgToQuote = new Map<number, ZaloQuoteData>();
 /** Insertion-order keys for eviction */
-const _msgKeyOrder: string[] = [];
+const _msgKeyOrder: string[] = [..._zaloToTg.keys()];
 
 export const msgStore = {
   /**
@@ -129,11 +143,14 @@ export const msgStore = {
       _zaloToTg.delete(old);
       if (oldTg !== undefined) _tgToQuote.delete(oldTg);
     }
+    let changed = false;
     for (const id of zaloMsgIds) {
       _zaloToTg.set(id, tgMsgId);
       _msgKeyOrder.push(id);
+      changed = true;
     }
     _tgToQuote.set(tgMsgId, quote);
+    if (changed) persistMsgMap();
   },
 
   /** Get the Telegram message_id for a given Zalo message ID. */
