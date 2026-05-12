@@ -564,38 +564,36 @@ export function setupTelegramHandler(
         if (msg.text.startsWith('/')) return;
         const socialVideoUrl = extractSocialVideoUrl(msg.text);
         if (socialVideoUrl) {
-          let localPaths: string[] = [];
           const label = socialVideoLabel(socialVideoUrl);
-          try {
-            await enqueueSocialVideo(`tg:${threadType}:${zaloId}`, `${label}:telegram`, async () => {
-            console.log(`[TG→Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
-            localPaths = await downloadSocialVideo(socialVideoUrl);
-            for (let i = 0; i < localPaths.length; i++) {
-              const uploaded = await api.uploadAttachment(localPaths[i], zaloId, threadType) as Array<{
-                fileUrl?: string;
-                normalUrl?: string;
-                hdUrl?: string;
-                thumbUrl?: string;
-              }>;
-              console.log(`[TG→Zalo][SocialVideo] Upload result part ${i + 1}/${localPaths.length}:`, JSON.stringify(uploaded[0] ?? {}));
-              const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
-              const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
-              if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
-              await api.sendVideo({
-                videoUrl: nativeVideoUrl,
-                thumbnailUrl,
-                duration: 30_000,
-                width: 720,
-                height: 1280,
-              }, zaloId, threadType);
-              console.log(`[TG→Zalo][SocialVideo] Sent native video part ${i + 1}/${localPaths.length}`);
+          void enqueueSocialVideo(`tg:${threadType}:${zaloId}`, `${label}:telegram`, async () => {
+            const localPaths: string[] = [];
+            try {
+              console.log(`[TG→Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
+              localPaths.push(...await downloadSocialVideo(socialVideoUrl));
+              for (let i = 0; i < localPaths.length; i++) {
+                const uploaded = await api.uploadAttachment(localPaths[i], zaloId, threadType) as Array<{
+                  fileUrl?: string;
+                  normalUrl?: string;
+                  hdUrl?: string;
+                  thumbUrl?: string;
+                }>;
+                console.log(`[TG→Zalo][SocialVideo] Upload result part ${i + 1}/${localPaths.length}:`, JSON.stringify(uploaded[0] ?? {}));
+                const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+                const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
+                if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+                await api.sendVideo({
+                  videoUrl: nativeVideoUrl,
+                  thumbnailUrl,
+                  duration: 30_000,
+                  width: 720,
+                  height: 1280,
+                }, zaloId, threadType);
+                console.log(`[TG→Zalo][SocialVideo] Sent native video part ${i + 1}/${localPaths.length}`);
+              }
+            } finally {
+              for (const lp of localPaths) await cleanTemp(lp);
             }
-            });
-          } catch (err) {
-            await notifyError('socialVideo', err);
-          } finally {
-            for (const lp of localPaths) await cleanTemp(lp);
-          }
+          }).catch(err => { void notifyError('socialVideo', err); });
           return;
         }
         console.log(`[TGâ†’Zalo] sendMessage â†’ zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
