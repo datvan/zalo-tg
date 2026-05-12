@@ -7,7 +7,7 @@ import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, medi
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4 } from '../utils/media.js';
-import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel, formatSocialVideoCaption } from '../utils/socialVideo.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 
@@ -569,7 +569,9 @@ export function setupTelegramHandler(
             const localPaths: string[] = [];
             try {
               console.log(`[TG→Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
-              localPaths.push(...await downloadSocialVideo(socialVideoUrl));
+              const downloaded = await downloadSocialVideo(socialVideoUrl);
+              localPaths.push(...downloaded.paths);
+              const socialCaption = formatSocialVideoCaption(downloaded.meta);
               for (let i = 0; i < localPaths.length; i++) {
                 const uploaded = await api.uploadAttachment(localPaths[i], zaloId, threadType) as Array<{
                   fileUrl?: string;
@@ -582,6 +584,7 @@ export function setupTelegramHandler(
                 const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
                 if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
                 await api.sendVideo({
+                  msg: socialCaption,
                   videoUrl: nativeVideoUrl,
                   thumbnailUrl,
                   duration: 30_000,

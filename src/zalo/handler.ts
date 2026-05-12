@@ -9,7 +9,7 @@ import { store } from '../store.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
-import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel } from '../utils/socialVideo.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel, formatSocialVideoCaption } from '../utils/socialVideo.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 
@@ -363,7 +363,9 @@ export function setupZaloHandler(api: ZaloAPI): void {
           let localPaths: string[] = [];
           try {
             console.log(`[SocialVideo] Downloading ${label} from ${source}: ${videoUrl}`);
-            localPaths = await downloadSocialVideo(videoUrl);
+            const downloaded = await downloadSocialVideo(videoUrl);
+            localPaths = downloaded.paths;
+            const socialCaption = formatSocialVideoCaption(downloaded.meta);
             for (let i = 0; i < localPaths.length; i++) {
               const partPath = localPaths[i];
               const uploaded = await api.uploadAttachment(partPath, zaloId, type) as Array<{
@@ -378,6 +380,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
               if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
               const result = await api.sendVideo(
                 {
+                  msg: socialCaption,
                   videoUrl: nativeVideoUrl,
                   thumbnailUrl,
                   duration: 30_000,

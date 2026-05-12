@@ -16,6 +16,17 @@ interface QueueItem<T> {
   reject: (err: unknown) => void;
 }
 
+export interface SocialVideoMeta {
+  platform: string;
+  uploader?: string;
+  title?: string;
+}
+
+export interface SocialVideoDownloadResult {
+  paths: string[];
+  meta: SocialVideoMeta;
+}
+
 const queues = new Map<string, QueueItem<unknown>[]>();
 let globalRunning = false;
 
@@ -151,7 +162,49 @@ async function splitForZalo(inputPath: string, firstNormalizedPath: string): Pro
   return outputs;
 }
 
-export async function downloadSocialVideo(url: string): Promise<string[]> {
+function cleanMetaText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned ? cleaned.slice(0, 160) : undefined;
+}
+
+async function fetchSocialVideoMeta(url: string): Promise<SocialVideoMeta> {
+  const platform = socialVideoLabel(url);
+  try {
+    const args = [
+      '-m', 'yt_dlp',
+      '--dump-single-json',
+      '--no-playlist',
+      '--no-warnings',
+      '--skip-download',
+      url,
+    ];
+    const json = await new Promise<string>((resolve, reject) => {
+      const p = spawn('python', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      p.stdout.on('data', d => { stdout += String(d); });
+      p.stderr.on('data', d => { stderr += String(d); });
+      p.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(`yt-dlp metadata exit ${code}: ${stderr.slice(-1000)}`)));
+      p.on('error', reject);
+    });
+    const data = JSON.parse(json) as Record<string, unknown>;
+    return {
+      platform,
+      uploader: cleanMetaText(data.uploader) ?? cleanMetaText(data.channel) ?? cleanMetaText(data.creator) ?? cleanMetaText(data.uploader_id),
+      title: cleanMetaText(data.title) ?? cleanMetaText(data.fulltitle),
+    };
+  } catch (err) {
+    console.warn('[SocialVideo] Metadata fetch failed:', err);
+    return { platform };
+  }
+}
+
+export function formatSocialVideoCaption(meta: SocialVideoMeta): string {
+  return [meta.platform, meta.uploader, meta.title].filter(Boolean).join(' - ').slice(0, 1000);
+}
+
+export async function downloadSocialVideo(url: string): Promise<SocialVideoDownloadResult> {
   mkdirSync(TMP_DIR, { recursive: true });
   const jobId = Date.now();
   const outBase = `social_${jobId}`;
@@ -183,7 +236,7 @@ export async function downloadSocialVideo(url: string): Promise<string[]> {
   let outPath: string | undefined;
   try {
     outPath = await normalizeForZalo(rawPath);
-    return await splitForZalo(rawPath, outPath);
+    return { paths: await splitForZalo(rawPath, outPath), meta: await fetchSocialVideoMeta(url) };
   } finally {
     for (const candidate of candidates) await cleanTemp(candidate);
   }
