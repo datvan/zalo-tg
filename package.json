@@ -12,7 +12,10 @@
     "test": "NODE_OPTIONS=--disable-warning=DEP0205 tsx --test tests/*.test.ts",
     "check": "npm run build && npm test",
     "test:coverage": "node --disable-warning=DEP0205 --import tsx --test --experimental-test-coverage tests/*.test.ts",
-    "security:audit": "npm audit --omit=dev"
+    "security:audit": "npm audit --omit=dev",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.1",
@@ -32,6 +35,7 @@
     "@types/node": "^20.14.0",
     "@types/qrcode": "^1.5.6",
     "@types/qrcode-terminal": "^0.12.2",
+    "@tauri-apps/cli": "^2",
     "tsx": "^4.15.6",
     "typescript": "^5.4.5"
   },

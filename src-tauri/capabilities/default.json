@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedayzhu/tauri/refs/heads/dev/crates/tauri-utils/schema/capability.schema.json",
+  "identifier": "default",
+  "description": "Default capabilities",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:tray:default",
+    "core:event:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen"
+  ]
+}

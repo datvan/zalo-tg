@@ -21,8 +21,11 @@ tmp/
 *.log
 npm-debug.log*
 
-# macOS
-.DS_Store
+# macOS app
+*.app
+
+# Rust / Tauri
+src-tauri/target/
 
 # Editor
 .vscode/

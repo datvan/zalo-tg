@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zalo-tg Bridge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="topbar-left">
+        <span class="logo">◆</span>
+        <h1>zalo-tg</h1>
+        <span id="status-badge" class="badge">● Stopped</span>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-start" class="btn btn-primary">Start</button>
+        <button id="btn-stop" class="btn btn-danger">Stop</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section id="status-panel" class="panel">
+        <h2 class="panel-title">Status</h2>
+        <div id="status-grid" class="status-grid">
+          <div class="stat-card">
+            <span class="stat-label">Bridge</span>
+            <span id="stat-bridge" class="stat-value stopped">● Stopped</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">PID</span>
+            <span id="stat-pid" class="stat-value">—</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Uptime</span>
+            <span id="stat-uptime" class="stat-value">—</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Logs</span>
+            <span id="stat-logs" class="stat-value">0</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="config-panel" class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Configuration</h2>
+          <div class="panel-actions">
+            <button id="btn-edit-env" class="btn btn-sm">Edit .env</button>
+          </div>
+        </div>
+        <div id="config-list" class="config-list"></div>
+      </section>
+
+      <section id="logs-panel" class="panel panel-logs">
+        <h2 class="panel-title">Logs</h2>
+        <div id="log-container" class="log-container"></div>
+      </section>
+    </main>
+
+    <footer id="footer">
+      <span>zalo-tg v0.1.0</span>
+      <span id="connection-status">● Connected</span>
+    </footer>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>
