@@ -414,47 +414,131 @@ function setupSettings() {
       btn.classList.add('active');
     });
   });
-  const saveBtn = $('#btn-save-settings');
-  if (saveBtn) saveBtn.addEventListener('click', saveSettings);
+
+  $('#btn-save-settings')?.addEventListener('click', saveSettings);
+  $('#btn-browse-env')?.addEventListener('click', pickAndLoadEnv);
+  $('#btn-default-env')?.addEventListener('click', resetToDefaultEnv);
+  $('#btn-add-var')?.addEventListener('click', addEnvRow);
 }
 
 async function loadConfig() {
   try {
     const cfg = await invoke('get_config');
-    state.config = cfg;
-    const vars = cfg.vars || {};
-    const setVal = (id, key) => {
-      const el = document.getElementById(id);
-      if (el) el.value = vars[key] || '';
-    };
-    setVal('set-tg-token', 'TG_TOKEN');
-    setVal('set-tg-group', 'TG_GROUP_ID');
-    setVal('set-zalo-qr', 'ZALO_QR_CODE_PATH');
-
-    // Show config source
-    const srcNote = document.getElementById('config-source');
-    if (srcNote && cfg.source_files && cfg.source_files.length > 0) {
-      const files = cfg.source_files.map(f => f.replace(/^.*[/\\]/, '')).join(' + ');
-      srcNote.textContent = 'Loaded from: ' + files;
-      srcNote.style.display = '';
-    } else if (srcNote) {
-      srcNote.textContent = 'No config file found — set variables below and save';
-      srcNote.style.display = '';
-    }
+    applyConfig(cfg);
   } catch (_) {}
 }
 
-async function saveSettings() {
-  if (!state.config) return;
-  const vars = { ...state.config.vars };
-  const g = id => (document.getElementById(id)?.value || '').trim();
-  if (g('set-tg-token')) vars['TG_TOKEN'] = g('set-tg-token');
-  if (g('set-tg-group')) vars['TG_GROUP_ID'] = g('set-tg-group');
-  if (g('set-zalo-qr')) vars['ZALO_QR_CODE_PATH'] = g('set-zalo-qr');
+function applyConfig(cfg) {
+  state.config = cfg;
+  const vars = cfg.vars || {};
+
+  $('#config-path').value = cfg.source_files?.length
+    ? cfg.source_files.join(', ')
+    : 'No file loaded';
+
+  const src = $('#config-source');
+  if (cfg.source_files?.length) {
+    const files = cfg.source_files.map(f => f.replace(/^.*[/\\]/, '')).join(' + ');
+    src.textContent = 'Loaded from: ' + files;
+  } else {
+    src.textContent = 'No config file found — add variables below and save to create one';
+  }
+
+  renderEnvList(vars);
+}
+
+function renderEnvList(vars) {
+  const list = $('#env-list');
+  if (!list) return;
+  const keys = Object.keys(vars).sort();
+  if (keys.length === 0) {
+    list.innerHTML = '<div class="empty-state" style="padding:12px 0">No variables yet. Click "+ Add" to add one.</div>';
+    return;
+  }
+  list.innerHTML = keys.map(k => envRowHTML(k, vars[k])).join('');
+
+  // Wire up remove buttons
+  list.querySelectorAll('.env-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key;
+      delete state.config.vars[key];
+      renderEnvList(state.config.vars);
+    });
+  });
+
+  // Wire up input changes
+  list.querySelectorAll('.env-key').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const oldKey = inp.dataset.origKey;
+      const newKey = inp.value.trim();
+      if (newKey && newKey !== oldKey) {
+        const val = state.config.vars[oldKey];
+        delete state.config.vars[oldKey];
+        state.config.vars[newKey] = val || '';
+      }
+    });
+  });
+  list.querySelectorAll('.env-val').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const key = inp.dataset.key;
+      state.config.vars[key] = inp.value;
+    });
+  });
+}
+
+function envRowHTML(key, val) {
+  const masked = /token|secret|password|key|auth/i.test(key);
+  const displayVal = masked && val ? '••••••••' : val || '';
+  return `<div class="env-row" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+    <input type="text" class="input mono env-key" style="width:200px;flex-shrink:0" value="${esc(key)}" data-orig-key="${esc(key)}" placeholder="KEY" />
+    <span style="color:var(--text-muted)">=</span>
+    <input type="${masked ? 'password' : 'text'}" class="input mono env-val" style="flex:1;min-width:0" value="${esc(displayVal)}" data-key="${esc(key)}" placeholder="value" />
+    <button class="btn btn-ghost btn-sm env-remove" data-key="${esc(key)}" title="Remove" style="color:var(--red)">×</button>
+  </div>`;
+}
+
+function addEnvRow() {
+  if (!state.config) state.config = { vars: {} };
+  if (!state.config.vars) state.config.vars = {};
+  const key = 'NEW_KEY_' + Date.now();
+  state.config.vars[key] = '';
+  renderEnvList(state.config.vars);
+  // Focus the new key input
+  const list = $('#env-list');
+  const lastInput = list?.querySelector('.env-key:last-of-type');
+  if (lastInput) setTimeout(() => lastInput.focus(), 50);
+}
+
+async function pickAndLoadEnv() {
   try {
-    await invoke('save_config', { vars });
+    const path = await invoke('pick_env_file');
+    if (!path) return;
+    const cfg = await invoke('load_custom_env', { path });
+    applyConfig(cfg);
+    addActivity('Loaded: ' + path.replace(/^.*[/\\]/, ''), 'info');
+  } catch (e) {
+    addActivity('Load failed: ' + e, 'error');
+  }
+}
+
+async function resetToDefaultEnv() {
+  try {
+    const cfg = await invoke('get_config');
+    applyConfig(cfg);
+    addActivity('Reset to default config', 'info');
+  } catch (e) {
+    addActivity('Reset failed: ' + e, 'error');
+  }
+}
+
+async function saveSettings() {
+  if (!state.config?.vars) return;
+  try {
+    await invoke('save_config', { vars: state.config.vars });
     addActivity('Settings saved', 'info');
-  } catch (e) { addActivity('Save failed: ' + e, 'error'); }
+  } catch (e) {
+    addActivity('Save failed: ' + e, 'error');
+  }
 }
 
 function fmtUptime(s) {

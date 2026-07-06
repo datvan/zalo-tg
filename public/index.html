@@ -167,57 +167,25 @@
           </div>
 
           <div class="settings-sections">
-            <p id="config-source" class="config-source" style="display:none;font-size:11px;color:var(--text-muted);margin:-8px 0 4px"></p>
             <section class="settings-group">
-              <h3>Bridge</h3>
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-label">Launch at login</span>
-                  <span class="setting-desc">Auto-start bridge when you log in</span>
+              <h3>Configuration File</h3>
+              <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <input type="text" id="config-path" class="input mono" style="flex:1" placeholder=".env" readonly />
+                  <button id="btn-browse-env" class="btn btn-sm">Browse…</button>
+                  <button id="btn-default-env" class="btn btn-sm" title="Reset to default .env">↺</button>
                 </div>
-                <label class="toggle">
-                  <input type="checkbox" id="set-autostart">
-                  <span class="toggle-track"><span class="toggle-knob"></span></span>
-                </label>
-              </div>
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-label">Minimize to tray</span>
-                  <span class="setting-desc">Keep running in background when closing window</span>
-                </div>
-                <label class="toggle">
-                  <input type="checkbox" id="set-minimize-tray" checked>
-                  <span class="toggle-track"><span class="toggle-knob"></span></span>
-                </label>
+                <p id="config-source" class="config-source" style="font-size:11px;color:var(--text-muted)"></p>
               </div>
             </section>
 
             <section class="settings-group">
-              <h3>Telegram</h3>
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-label">Bot Token</span>
-                  <span class="setting-desc">From @BotFather on Telegram</span>
+              <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:0;padding:0">
+                <div class="env-header" style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:8px">
+                  <h3 style="margin:0;padding:0;border:none">Environment Variables</h3>
+                  <button id="btn-add-var" class="btn btn-ghost btn-sm">+ Add</button>
                 </div>
-                <input type="password" id="set-tg-token" class="input" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-label">Group / Channel ID</span>
-                  <span class="setting-desc">Numeric ID of the Telegram group</span>
-                </div>
-                <input type="text" id="set-tg-group" class="input mono" placeholder="-1001234567890" />
-              </div>
-            </section>
-
-            <section class="settings-group">
-              <h3>Zalo</h3>
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-label">QR Code Path</span>
-                  <span class="setting-desc">Where to save the login QR code image</span>
-                </div>
-                <input type="text" id="set-zalo-qr" class="input mono" placeholder="./qr.png" />
+                <div id="env-list"></div>
               </div>
             </section>
 

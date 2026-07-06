@@ -9,10 +9,9 @@ pub struct AppConfig {
     pub env_path: String,
     pub source_files: Vec<String>,
     pub vars: HashMap<String, String>,
-    pub editable_keys: Vec<String>,
 }
 
-fn parse_env(content: &str) -> HashMap<String, String> {
+pub fn parse_env(content: &str) -> HashMap<String, String> {
     let mut vars = HashMap::new();
     for line in content.lines() {
         let line = line.trim();
@@ -37,14 +36,12 @@ pub fn load_merged_env(base: &PathBuf, local: &PathBuf) -> (HashMap<String, Stri
     let mut sources = Vec::new();
     let mut vars = HashMap::new();
 
-    // Load .env first
     let (base_vars, base_ok) = load_file(base);
     if base_ok {
         vars.extend(base_vars);
         sources.push(base.to_string_lossy().to_string());
     }
 
-    // Load .env.local on top (overrides .env)
     let (local_vars, local_ok) = load_file(local);
     if local_ok {
         vars.extend(local_vars);
@@ -62,14 +59,4 @@ pub fn save_env(path: &PathBuf, vars: &HashMap<String, String>) -> Result<(), St
         .join("\n")
         + "\n";
     fs::write(path, content).map_err(|e| format!("write .env: {e}"))
-}
-
-pub fn editable_keys() -> Vec<String> {
-    vec![
-        "TG_TOKEN".into(),
-        "TG_GROUP_ID".into(),
-        "ZALO_QR_CODE_PATH".into(),
-        "FORUM_TOPIC_TTL_HOURS".into(),
-        "LOG_LEVEL".into(),
-    ]
 }

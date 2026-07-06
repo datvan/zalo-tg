@@ -12,6 +12,10 @@ mod config;
 
 use config::AppConfig;
 
+fn base_paths(project_dir: &PathBuf) -> (PathBuf, PathBuf) {
+    (project_dir.join(".env"), project_dir.join(".env.local"))
+}
+
 struct AppState {
     bridge: bridge::BridgeProcess,
     project_dir: PathBuf,
@@ -52,8 +56,7 @@ async fn get_config(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<AppConfig, String> {
     let state = state.lock().await;
-    let base = state.project_dir.join(".env");
-    let local = state.project_dir.join(".env.local");
+    let (base, local) = base_paths(&state.project_dir);
     let (vars, source_files) = config::load_merged_env(&base, &local);
     let env_path = if source_files.is_empty() {
         base.to_string_lossy().to_string()
@@ -64,7 +67,24 @@ async fn get_config(
         env_path,
         source_files,
         vars,
-        editable_keys: config::editable_keys(),
+    })
+}
+
+#[tauri::command]
+async fn load_custom_env(
+    state: tauri::State<'_, Mutex<AppState>>,
+    path: String,
+) -> Result<AppConfig, String> {
+    let state = state.lock().await;
+    let file_path = PathBuf::from(&path);
+    let (vars, found) = config::load_file(&file_path);
+    if !found {
+        return Err("File not found".into());
+    }
+    Ok(AppConfig {
+        env_path: path.clone(),
+        source_files: vec![path],
+        vars,
     })
 }
 
@@ -93,6 +113,16 @@ async fn toggle_window(app: tauri::AppHandle) -> Result<(), ()> {
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn pick_env_file() -> Result<Option<String>, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("env", &[".env", ".env.local", "env"])
+        .set_title("Select Environment File")
+        .pick_file()
+        .await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -188,7 +218,9 @@ fn main() {
             get_bridge_status,
             get_logs,
             get_config,
+            load_custom_env,
             save_config,
+            pick_env_file,
             open_env_file,
             toggle_window,
         ])
