@@ -9,61 +9,249 @@
 <body>
   <div id="app">
     <header id="topbar">
-      <div class="topbar-left">
-        <span class="logo">◆</span>
-        <h1>zalo-tg</h1>
-        <span id="status-badge" class="badge">● Stopped</span>
+      <div class="traffic-light">
+        <span class="dot dot-red"></span>
+        <span class="dot dot-yellow"></span>
+        <span class="dot dot-green"></span>
       </div>
-      <div class="topbar-right">
-        <button id="btn-start" class="btn btn-primary">Start</button>
-        <button id="btn-stop" class="btn btn-danger">Stop</button>
+      <span id="titlebar-text" class="titlebar-text">zalo-tg Bridge</span>
+      <div id="topbar-right">
+        <span id="global-badge" class="badge">● Stopped</span>
       </div>
     </header>
 
-    <main id="main">
-      <section id="status-panel" class="panel">
-        <h2 class="panel-title">Status</h2>
-        <div id="status-grid" class="status-grid">
-          <div class="stat-card">
-            <span class="stat-label">Bridge</span>
-            <span id="stat-bridge" class="stat-value stopped">● Stopped</span>
+    <div id="body">
+      <nav id="sidebar">
+        <div class="nav-items">
+          <button class="nav-item active" data-view="dashboard" title="Dashboard">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <rect x="2" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="11" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="2" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="11" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+            </svg>
+          </button>
+          <button class="nav-item" data-view="messages" title="Messages">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 3h14a1 1 0 011 1v10a1 1 0 01-1 1H7l-4 3V4a1 1 0 011-1z" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M6 8h8M6 11h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button class="nav-item" data-view="settings" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M3.4 3.4l1.4 1.4M15.2 15.2l1.4 1.4M3.4 16.6l1.4-1.4M15.2 4.8l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="nav-bottom">
+          <button class="nav-item" id="btn-toggle-tray" title="Minimize to tray">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 14h14M3 14a1 1 0 01-1-1V5a1 1 0 011-1h14a1 1 0 011 1v8a1 1 0 01-1 1" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M10 14v4M7 18h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </nav>
+
+      <main id="main">
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view active">
+          <div class="view-header">
+            <h2>Dashboard</h2>
+            <div class="view-actions">
+              <button id="btn-start" class="btn btn-primary">Start Bridge</button>
+              <button id="btn-stop" class="btn btn-secondary">Stop</button>
+            </div>
           </div>
-          <div class="stat-card">
-            <span class="stat-label">PID</span>
-            <span id="stat-pid" class="stat-value">—</span>
+
+          <div class="stat-grid">
+            <div class="stat-card" id="stat-card-bridge">
+              <div class="stat-icon"><div class="dot-indicator green"></div></div>
+              <div class="stat-body">
+                <span class="stat-label">Bridge</span>
+                <span class="stat-value" id="stat-bridge">Stopped</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-card-zalo">
+              <div class="stat-icon zd">Z</div>
+              <div class="stat-body">
+                <span class="stat-label">Zalo</span>
+                <span class="stat-value" id="stat-zalo">—</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-card-tg">
+              <div class="stat-icon tg">T</div>
+              <div class="stat-body">
+                <span class="stat-label">Telegram</span>
+                <span class="stat-value" id="stat-tg">—</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-card-msgs">
+              <div class="stat-icon"><svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M3 3h14a1 1 0 011 1v10a1 1 0 01-1 1H7l-4 3V4a1 1 0 011-1z" stroke="currentColor" stroke-width="1.6"/></svg></div>
+              <div class="stat-body">
+                <span class="stat-label">Today</span>
+                <span class="stat-value" id="stat-msgs">0</span>
+              </div>
+            </div>
           </div>
-          <div class="stat-card">
-            <span class="stat-label">Uptime</span>
-            <span id="stat-uptime" class="stat-value">—</span>
+
+          <div class="panel-row">
+            <div class="panel chart-panel">
+              <div class="panel-titlebar">
+                <span class="panel-title">Messages per minute</span>
+                <span id="chart-rate" class="panel-badge">0/min</span>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="msg-chart" height="160"></canvas>
+              </div>
+            </div>
+            <div class="panel info-panel">
+              <div class="panel-titlebar">
+                <span class="panel-title">Activity</span>
+                <span id="activity-count" class="panel-badge">0</span>
+              </div>
+              <div id="activity-feed" class="activity-feed">
+                <div class="empty-state">Waiting for bridge events…</div>
+              </div>
+            </div>
           </div>
-          <div class="stat-card">
-            <span class="stat-label">Logs</span>
-            <span id="stat-logs" class="stat-value">0</span>
+
+          <div class="panel">
+            <div class="panel-titlebar">
+              <span class="panel-title">Bridge Log</span>
+              <button id="btn-clear-logs" class="btn btn-ghost btn-sm">Clear</button>
+            </div>
+            <div id="log-container" class="log-container"></div>
           </div>
         </div>
-      </section>
 
-      <section id="config-panel" class="panel">
-        <div class="panel-header">
-          <h2 class="panel-title">Configuration</h2>
-          <div class="panel-actions">
-            <button id="btn-edit-env" class="btn btn-sm">Edit .env</button>
+        <!-- Messages View -->
+        <div id="view-messages" class="view">
+          <div class="view-header">
+            <h2>Messages</h2>
+            <div class="view-actions">
+              <div class="search-box">
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="8.5" cy="8.5" r="6" stroke="currentColor" stroke-width="1.6"/><path d="M13 13l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <input type="text" id="msg-search" placeholder="Search messages…" />
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="msg-stats-bar">
+              <span>Total: <strong id="msg-total">0</strong></span>
+              <span><span class="zd-badge">Z → T</span> <strong id="msg-zt">0</strong></span>
+              <span><span class="tg-badge">T → Z</span> <strong id="msg-tz">0</strong></span>
+              <span class="sep">|</span>
+              <label class="filter-label">
+                <input type="checkbox" id="filter-zt" checked> Z→T
+              </label>
+              <label class="filter-label">
+                <input type="checkbox" id="filter-tz" checked> T→Z
+              </label>
+            </div>
+            <div id="msg-list" class="msg-list">
+              <div class="empty-state">No messages yet</div>
+            </div>
           </div>
         </div>
-        <div id="config-list" class="config-list"></div>
-      </section>
 
-      <section id="logs-panel" class="panel panel-logs">
-        <h2 class="panel-title">Logs</h2>
-        <div id="log-container" class="log-container"></div>
-      </section>
-    </main>
+        <!-- Settings View -->
+        <div id="view-settings" class="view">
+          <div class="view-header">
+            <h2>Settings</h2>
+            <div class="view-actions">
+              <button id="btn-save-settings" class="btn btn-primary">Save</button>
+            </div>
+          </div>
+
+          <div class="settings-sections">
+            <section class="settings-group">
+              <h3>Bridge</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">Launch at login</span>
+                  <span class="setting-desc">Auto-start bridge when you log in</span>
+                </div>
+                <label class="toggle">
+                  <input type="checkbox" id="set-autostart">
+                  <span class="toggle-track"><span class="toggle-knob"></span></span>
+                </label>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">Minimize to tray</span>
+                  <span class="setting-desc">Keep running in background when closing window</span>
+                </div>
+                <label class="toggle">
+                  <input type="checkbox" id="set-minimize-tray" checked>
+                  <span class="toggle-track"><span class="toggle-knob"></span></span>
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-group">
+              <h3>Telegram</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">Bot Token</span>
+                  <span class="setting-desc">From @BotFather on Telegram</span>
+                </div>
+                <input type="password" id="set-tg-token" class="input" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">Group / Channel ID</span>
+                  <span class="setting-desc">Numeric ID of the Telegram group</span>
+                </div>
+                <input type="text" id="set-tg-group" class="input mono" placeholder="-1001234567890" />
+              </div>
+            </section>
+
+            <section class="settings-group">
+              <h3>Zalo</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">QR Code Path</span>
+                  <span class="setting-desc">Where to save the login QR code image</span>
+                </div>
+                <input type="text" id="set-zalo-qr" class="input mono" placeholder="./qr.png" />
+              </div>
+            </section>
+
+            <section class="settings-group">
+              <h3>Appearance</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">Theme</span>
+                  <span class="setting-desc">Follow your system appearance</span>
+                </div>
+                <div class="theme-picker">
+                  <button class="theme-opt active" data-theme="system">Auto</button>
+                  <button class="theme-opt" data-theme="dark">Dark</button>
+                  <button class="theme-opt" data-theme="light">Light</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
 
     <footer id="footer">
-      <span>zalo-tg v0.1.0</span>
-      <span id="connection-status">● Connected</span>
+      <div class="footer-left">
+        <span id="footer-status" class="status-dot stopped">● Stopped</span>
+        <span class="sep">·</span>
+        <span id="footer-uptime">—</span>
+      </div>
+      <div class="footer-right">
+        <span id="footer-stats">0 msgs today</span>
+        <span class="sep">·</span>
+        <span>zalo-tg v0.1.0</span>
+      </div>
     </footer>
   </div>
-  <script src="index.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

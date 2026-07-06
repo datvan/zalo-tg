@@ -76,6 +76,19 @@ async fn save_config(
 }
 
 #[tauri::command]
+async fn toggle_window(app: tauri::AppHandle) -> Result<(), ()> {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_env_file(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
@@ -168,6 +181,7 @@ fn main() {
             get_config,
             save_config,
             open_env_file,
+            toggle_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
