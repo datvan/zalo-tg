@@ -116,13 +116,21 @@ async fn toggle_window(app: tauri::AppHandle) -> Result<(), ()> {
 }
 
 #[tauri::command]
-async fn pick_env_file() -> Result<Option<String>, String> {
-    let file = rfd::AsyncFileDialog::new()
-        .add_filter("env", &[".env", ".env.local", "env"])
-        .set_title("Select Environment File")
-        .pick_file()
-        .await;
-    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+async fn list_env_files(
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<String>, String> {
+    let state = state.lock().await;
+    let dir = std::fs::read_dir(&state.project_dir).map_err(|e| format!("read dir: {e}"))?;
+    let mut files: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            name == ".env" || name == ".env.local" || name.starts_with(".env.")
+        })
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 #[tauri::command]
@@ -220,7 +228,7 @@ fn main() {
             get_config,
             load_custom_env,
             save_config,
-            pick_env_file,
+            list_env_files,
             open_env_file,
             toggle_window,
         ])

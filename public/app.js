@@ -416,7 +416,6 @@ function setupSettings() {
   });
 
   $('#btn-save-settings')?.addEventListener('click', saveSettings);
-  $('#btn-browse-env')?.addEventListener('click', pickAndLoadEnv);
   $('#btn-default-env')?.addEventListener('click', resetToDefaultEnv);
   $('#btn-add-var')?.addEventListener('click', addEnvRow);
 }
@@ -441,10 +440,50 @@ function applyConfig(cfg) {
     const files = cfg.source_files.map(f => f.replace(/^.*[/\\]/, '')).join(' + ');
     src.textContent = 'Loaded from: ' + files;
   } else {
-    src.textContent = 'No config file found — add variables below and save to create one';
+    src.textContent = 'No config file found — add variables below and save';
   }
 
   renderEnvList(vars);
+  listEnvFiles();
+}
+
+async function listEnvFiles() {
+  try {
+    const files = await invoke('list_env_files');
+    const container = $('#env-files-list');
+    if (!container) return;
+    if (!files || files.length === 0) {
+      container.innerHTML = '<div style="color:var(--text-muted);padding:4px 0">No .env files found in project directory</div>';
+      return;
+    }
+    const current = state.config?.source_files || [];
+    const currentNames = current.map(f => f.replace(/^.*[/\\]/, ''));
+    let html = '<div style="display:flex;flex-direction:column;gap:2px">';
+    for (const f of files) {
+      const name = f.replace(/^.*[/\\]/, '');
+      const active = currentNames.includes(name);
+      html += `<button class="env-file-btn ${active ? 'active' : ''}" data-path="${esc(f)}" style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;border:none;background:${active ? 'var(--accent-dim)' : 'transparent'};color:${active ? 'var(--accent)' : 'var(--text-secondary)'};cursor:pointer;font-size:12px;font-family:var(--font-mono);text-align:left;width:100%">
+        <span>📄</span>
+        <span style="flex:1">${esc(name)}</span>
+        ${active ? '<span style="font-size:10px;color:var(--accent)">active</span>' : '<span style="font-size:10px;color:var(--text-muted)">click to load</span>'}
+      </button>`;
+    }
+    html += '</div>';
+    container.innerHTML = html;
+
+    container.querySelectorAll('.env-file-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const path = btn.dataset.path;
+        try {
+          const cfg = await invoke('load_custom_env', { path });
+          applyConfig(cfg);
+          addActivity('Loaded: ' + path.replace(/^.*[/\\]/, ''), 'info');
+        } catch (e) {
+          addActivity('Load failed: ' + e, 'error');
+        }
+      });
+    });
+  } catch (_) {}
 }
 
 function renderEnvList(vars) {
@@ -507,18 +546,6 @@ function addEnvRow() {
   const list = $('#env-list');
   const lastInput = list?.querySelector('.env-key:last-of-type');
   if (lastInput) setTimeout(() => lastInput.focus(), 50);
-}
-
-async function pickAndLoadEnv() {
-  try {
-    const path = await invoke('pick_env_file');
-    if (!path) return;
-    const cfg = await invoke('load_custom_env', { path });
-    applyConfig(cfg);
-    addActivity('Loaded: ' + path.replace(/^.*[/\\]/, ''), 'info');
-  } catch (e) {
-    addActivity('Load failed: ' + e, 'error');
-  }
 }
 
 async function resetToDefaultEnv() {
