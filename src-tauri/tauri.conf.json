@@ -5,11 +5,12 @@
   "identifier": "com.zalotg.desktop",
   "build": {
     "frontendDist": "../public",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+        "devUrl": "http://localhost:54321",
+        "beforeDevCommand": "python3 -m http.server 54321 --directory ../public",
+        "beforeBuildCommand": ""
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "zalo-tg Bridge",
@@ -29,8 +30,8 @@
       "tooltip": "zalo-tg"
     },
     "security": {
-      "csp": null
-    }
+            "csp": null
+        }
   },
   "bundle": {
     "active": true,

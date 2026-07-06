@@ -52,10 +52,17 @@ async fn get_config(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<AppConfig, String> {
     let state = state.lock().await;
-    let env_path = state.project_dir.join(".env");
-    let vars = config::load_env(&env_path);
+    let base = state.project_dir.join(".env");
+    let local = state.project_dir.join(".env.local");
+    let (vars, source_files) = config::load_merged_env(&base, &local);
+    let env_path = if source_files.is_empty() {
+        base.to_string_lossy().to_string()
+    } else {
+        source_files.join(", ")
+    };
     Ok(AppConfig {
-        env_path: env_path.to_string_lossy().to_string(),
+        env_path,
+        source_files,
         vars,
         editable_keys: config::editable_keys(),
     })
@@ -93,13 +100,15 @@ async fn open_env_file(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
     let state = state.lock().await;
-    let env_path = state.project_dir.join(".env");
+    let base = state.project_dir.join(".env");
+    let local = state.project_dir.join(".env.local");
+    let target = if local.exists() { local } else { base };
     drop(state);
-    if env_path.exists() {
+    if target.exists() {
         std::process::Command::new("open")
-            .arg(env_path.to_str().unwrap_or(""))
+            .arg(target.to_str().unwrap_or(""))
             .status()
-            .map_err(|e| format!("open .env: {e}"))?;
+            .map_err(|e| format!("open env: {e}"))?;
     }
     Ok(())
 }
