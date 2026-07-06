@@ -32,3 +32,4 @@ src-tauri/target/
 .idea/
 logs/
 app-session.json
+**/.DS_Store
