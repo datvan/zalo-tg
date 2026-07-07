@@ -312,20 +312,20 @@ async fn handle_event_inner(
         }
         // Typing indicator
         801 => {
-            let thread_id = event_data["data"]["uid"]
-                .as_str().or_else(|| event_data["data"]["gid"].as_str())
+            let thread_id = event_data["uid"]
+                .as_str().or_else(|| event_data["gid"].as_str())
                 .unwrap_or("").to_string();
-            let is_group = event_data["data"]["gid"].is_string();
+            let is_group = event_data["gid"].is_string();
             let _ = tx.send(WsEvent::Typing { thread_id, is_group }).await;
         }
         // Seen/read receipt
         802 => {
-            let thread_id = event_data["data"]["uid"]
-                .as_str().or_else(|| event_data["data"]["gid"].as_str())
+            let thread_id = event_data["uid"]
+                .as_str().or_else(|| event_data["gid"].as_str())
                 .unwrap_or("").to_string();
             let msg_ids: Vec<String> = vec![
-                event_data["data"]["msgId"].as_str().unwrap_or("").to_string(),
-                event_data["data"]["realMsgId"].as_str().unwrap_or("").to_string(),
+                event_data["msgId"].as_str().unwrap_or("").to_string(),
+                event_data["realMsgId"].as_str().unwrap_or("").to_string(),
             ].into_iter().filter(|s| !s.is_empty()).collect();
             let _ = tx.send(WsEvent::Seen { thread_id, msg_ids }).await;
         }
@@ -453,5 +453,191 @@ mod tests {
                 _ => panic!("expected Message event"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_521_group_msg() {
+        let payload = serde_json::json!({
+            "data": {
+                "groupMsgs": [{"msgId": "g1", "text": "group hi"}]
+            }
+        });
+        let frame = build_binary_frame(1, 521, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::GroupMessage(msg) => {
+                assert_eq!(msg["msgId"], "g1");
+            }
+            _ => panic!("expected GroupMessage"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_610_reaction() {
+        let payload = serde_json::json!({"data": {"content": {"rIcon": "/-heart"}}});
+        let frame = build_binary_frame(1, 610, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::Reaction(data) => assert_eq!(data["content"]["rIcon"], "/-heart"),
+            _ => panic!("expected Reaction"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_611_group_reaction() {
+        let payload = serde_json::json!({"data": {"content": {"rIcon": "/-strong"}}});
+        let frame = build_binary_frame(1, 611, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::GroupReaction(data) => assert_eq!(data["content"]["rIcon"], "/-strong"),
+            _ => panic!("expected GroupReaction"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_312_dm_undo() {
+        let payload = serde_json::json!({
+            "data": {"content": {"globalMsgId": "msg123", "callerId": "user456"}}
+        });
+        let frame = build_binary_frame(1, 312, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::Undo { msg_id, thread_id, is_group, .. } => {
+                assert_eq!(msg_id, "msg123");
+                assert_eq!(thread_id, "user456");
+                assert!(!is_group);
+            }
+            _ => panic!("expected Undo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_322_group_undo() {
+        let payload = serde_json::json!({
+            "data": {"content": {"globalMsgId": "gmsg789", "gridId": "group999"}}
+        });
+        let frame = build_binary_frame(1, 322, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::Undo { msg_id, thread_id, is_group, .. } => {
+                assert_eq!(msg_id, "gmsg789");
+                assert_eq!(thread_id, "group999");
+                assert!(is_group);
+            }
+            _ => panic!("expected Undo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_3001_group_event() {
+        let payload = serde_json::json!({
+            "data": {"event": {"type": "join", "groupId": "g1", "memberId": "u1"}}
+        });
+        let frame = build_binary_frame(1, 3001, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::GroupEvent { event_type, group_id, .. } => {
+                assert_eq!(event_type, "join");
+                assert_eq!(group_id, "g1");
+            }
+            _ => panic!("expected GroupEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_801_typing() {
+        let payload = serde_json::json!({"data": {"uid": "user123"}});
+        let frame = build_binary_frame(1, 801, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::Typing { thread_id, is_group } => {
+                assert_eq!(thread_id, "user123");
+                assert!(!is_group);
+            }
+            _ => panic!("expected Typing"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_cmd_701_old_messages() {
+        let payload = serde_json::json!({
+            "data": {"msgs": [{"msgId": "1"}, {"msgId": "2"}]}
+        });
+        let frame = build_binary_frame(1, 701, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::OldMessages { messages, is_group } => {
+                assert_eq!(messages.len(), 2);
+                assert!(!is_group);
+            }
+            _ => panic!("expected OldMessages"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_unhandled_cmd() {
+        let payload = serde_json::json!({"data": {"foo": "bar"}});
+        let frame = build_binary_frame(1, 9999, 0, &payload).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        handle_event(&frame, &None, &tx).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            WsEvent::Other { cmd, .. } => assert_eq!(cmd, 9999),
+            _ => panic!("expected Other"),
+        }
+    }
+
+    #[test]
+    fn test_array_items_from_array() {
+        let v = serde_json::json!([1, 2, 3]);
+        assert_eq!(array_items(&v).len(), 3);
+    }
+
+    #[test]
+    fn test_array_items_from_null() {
+        let v = Value::Null;
+        assert!(array_items(&v).is_empty());
+    }
+
+    #[test]
+    fn test_array_items_from_object() {
+        let v = serde_json::json!({"key": "val"});
+        assert_eq!(array_items(&v).len(), 1);
+    }
+
+    #[test]
+    fn test_pick_url_empty() {
+        assert_eq!(pick_url(&[]), "wss://ws.chat.zalo.me/ws");
+    }
+
+    #[test]
+    fn test_pick_url_first() {
+        let urls = vec!["wss://custom.com".to_string()];
+        assert_eq!(pick_url(&urls), "wss://custom.com");
     }
 }

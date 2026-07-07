@@ -117,6 +117,7 @@ function updateStatus(s) {
   if (isRunning && !state.prevRunning) {
     addActivity('Bridge started', 'start');
     showToast('Bridge started successfully', 'success');
+    loadContacts();
   } else if (!isRunning && state.prevRunning) {
     addActivity('Bridge stopped', 'stop');
     showToast('Bridge stopped', 'info');
@@ -409,6 +410,22 @@ function setupContacts() {
       renderContacts();
     });
   });
+  // Load contacts when bridge is running
+  setInterval(async () => {
+    if (state.bridge) await loadContacts();
+  }, 30000);
+}
+
+async function loadContacts() {
+  try {
+    const [friends, groups] = await Promise.all([
+      invoke('get_friends').catch(() => []),
+      invoke('get_groups').catch(() => []),
+    ]);
+    if (Array.isArray(friends) && friends.length > 0) state.contacts.friends = friends;
+    if (Array.isArray(groups) && groups.length > 0) state.contacts.groups = groups;
+    renderContacts();
+  } catch (_) {}
 }
 
 function renderContacts() {

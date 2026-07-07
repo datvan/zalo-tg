@@ -736,42 +736,156 @@ mod tests {
     }
 
     #[test]
+    fn test_format_video() {
+        let (text, _) = format_zalo_message("Bob", "", "chat.video.msg");
+        assert!(text.contains("🎬"));
+    }
+
+    #[test]
+    fn test_format_voice() {
+        let (text, _) = format_zalo_message("Bob", "", "chat.voice");
+        assert!(text.contains("🎤"));
+    }
+
+    #[test]
+    fn test_format_sticker() {
+        let (text, _) = format_zalo_message("Bob", "", "chat.sticker");
+        assert!(text.contains("🎨"));
+    }
+
+    #[test]
+    fn test_format_doodle() {
+        let (text, _) = format_zalo_message("Bob", "", "chat.doodle");
+        assert!(text.contains("🎨"));
+    }
+
+    #[test]
+    fn test_format_file() {
+        let (text, _) = format_zalo_message("Bob", "", "share.file");
+        assert!(text.contains("📎"));
+    }
+
+    #[test]
+    fn test_format_link_with_content() {
+        let (text, _) = format_zalo_message("Bob", "https://example.com", "chat.recommended");
+        assert!(text.contains("🔗"));
+        assert!(text.contains("https://example.com"));
+    }
+
+    #[test]
+    fn test_format_link_empty() {
+        let (text, _) = format_zalo_message("Bob", "", "chat.recommended");
+        assert!(text.contains("🔗"));
+        assert!(text.contains("[Link]"));
+    }
+
+    #[test]
     fn test_format_unknown() {
         let (text, _) = format_zalo_message("Bob", "", "custom.x");
         assert!(text.contains("[custom.x]"));
     }
 
     #[test]
+    fn test_format_html_escaping() {
+        let (text, _) = format_zalo_message("<script>", "alert('xss')", "webchat");
+        assert!(text.contains("&lt;script&gt;"));
+        assert!(!text.contains("<script>"));
+        assert!(text.contains("alert('xss')"));
+    }
+
+    #[test]
     fn test_escape_html() {
         assert_eq!(escape_html("<b>"), "&lt;b&gt;");
+        assert_eq!(escape_html("a&b"), "a&amp;b");
+        assert_eq!(escape_html("normal"), "normal");
     }
 
     #[test]
     fn test_trunc() {
         assert_eq!(trunc_str("hello", 10), "hello");
         assert_eq!(trunc_str("hello world", 5), "hello…");
+        assert_eq!(trunc_str("", 5), "");
     }
 
     #[test]
-    fn test_reaction_maps() {
+    fn test_str_or_i64_string() {
+        let v = serde_json::json!("abc123");
+        assert_eq!(str_or_i64(&v), "abc123");
+    }
+
+    #[test]
+    fn test_str_or_i64_number() {
+        let v = serde_json::json!(42);
+        assert_eq!(str_or_i64(&v), "42");
+    }
+
+    #[test]
+    fn test_str_or_i64_null() {
+        let v = Value::Null;
+        assert_eq!(str_or_i64(&v), "");
+    }
+
+    #[test]
+    fn test_zalo_to_tg_reactions() {
         assert_eq!(map_zalo_reaction_to_tg("/-heart"), "❤️");
+        assert_eq!(map_zalo_reaction_to_tg("❤"), "❤️");
         assert_eq!(map_zalo_reaction_to_tg("/-strong"), "👍");
+        assert_eq!(map_zalo_reaction_to_tg("👍"), "👍");
+        assert_eq!(map_zalo_reaction_to_tg("/-wow"), "😮");
+        assert_eq!(map_zalo_reaction_to_tg("/-laugh"), "😂");
+        assert_eq!(map_zalo_reaction_to_tg("/-sad"), "😢");
         assert_eq!(map_zalo_reaction_to_tg("unknown"), "👍");
+    }
+
+    #[test]
+    fn test_tg_to_zalo_reactions() {
         let (t, i) = map_tg_reaction_to_zalo("❤️");
         assert_eq!(t, 5); assert_eq!(i, "❤");
-        let (t, _) = map_tg_reaction_to_zalo("👍");
-        assert_eq!(t, 1);
+        let (t, i) = map_tg_reaction_to_zalo("👍");
+        assert_eq!(t, 1); assert_eq!(i, "👍");
+        let (t, i) = map_tg_reaction_to_zalo("👎");
+        assert_eq!(t, 11); assert_eq!(i, "👎");
+        let (t, i) = map_tg_reaction_to_zalo("😂");
+        assert_eq!(t, 3); assert_eq!(i, "😂");
+        let (t, i) = map_tg_reaction_to_zalo("😮");
+        assert_eq!(t, 4); assert_eq!(i, "😮");
+        let (t, i) = map_tg_reaction_to_zalo("🔥");
+        assert_eq!(t, 12); assert_eq!(i, "👏");
+        let (t, _) = map_tg_reaction_to_zalo("🤷");
+        assert_eq!(t, 5); // default heart
     }
 
     #[test]
     fn test_infer_level() {
-        assert_eq!(infer_level("error here"), "ERROR");
-        assert_eq!(infer_level("warning"), "WARN");
-        assert_eq!(infer_level("normal"), "INFO");
+        assert_eq!(infer_level("[BRIDGE] error occurred"), "ERROR");
+        assert_eq!(infer_level("[TG] Error: timeout"), "ERROR");
+        assert_eq!(infer_level("[BRIDGE] ERR code"), "ERROR");
+        assert_eq!(infer_level("[TG] warning: rate limited"), "WARN");
+        assert_eq!(infer_level("[TG] WARN"), "WARN");
+        assert_eq!(infer_level("[BRIDGE] Bridge started"), "INFO");
+        assert_eq!(infer_level("normal log"), "INFO");
+    }
+
+    #[test]
+    fn test_msg_array_from_array() {
+        let v = serde_json::json!([{"a": 1}, {"b": 2}]);
+        assert_eq!(msg_array(&v).len(), 2);
+    }
+
+    #[test]
+    fn test_msg_array_from_object() {
+        let v = serde_json::json!({"a": 1});
+        assert_eq!(msg_array(&v).len(), 1);
+    }
+
+    #[test]
+    fn test_msg_array_from_null() {
+        let v = Value::Null;
+        assert_eq!(msg_array(&v).len(), 1);
     }
 
     #[tokio::test]
-    async fn test_inflight() {
+    async fn test_inflight_tracking() {
         let db = crate::store::Database::open_in_memory().unwrap();
         let zc = Arc::new(ZaloClient::new("."));
         let ctx = BridgeCtx {
@@ -784,5 +898,74 @@ mod tests {
         mark_inflight(&ctx, "m1").await;
         assert!(is_inflight(&ctx, "m1").await);
         assert!(!is_inflight(&ctx, "m2").await);
+    }
+
+    #[tokio::test]
+    async fn test_inflight_multiple() {
+        let db = crate::store::Database::open_in_memory().unwrap();
+        let zc = Arc::new(ZaloClient::new("."));
+        let ctx = BridgeCtx {
+            db: Arc::new(db), tg: Arc::new(Mutex::new(None)), zc,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            tg_group_id: -100, skip_muted_groups: false, mute_silent: false,
+            inflight: Arc::new(Mutex::new(Vec::new())),
+        };
+        mark_inflight(&ctx, "a").await;
+        mark_inflight(&ctx, "b").await;
+        mark_inflight(&ctx, "c").await;
+        assert!(is_inflight(&ctx, "a").await);
+        assert!(is_inflight(&ctx, "b").await);
+        assert!(is_inflight(&ctx, "c").await);
+        assert!(!is_inflight(&ctx, "d").await);
+    }
+
+    #[tokio::test]
+    async fn test_log_line_cap() {
+        let logs: LogBuf = Arc::new(Mutex::new(Vec::new()));
+        for i in 0..5 {
+            log_line(&logs, format!("line {i}")).await;
+        }
+        assert_eq!(logs.lock().await.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_db_topic_roundtrip() {
+        let db = crate::store::Database::open_in_memory().unwrap();
+        let entry = TopicEntry {
+            topic_id: 42,
+            zalo_id: "user123".into(),
+            thread_type: 0,
+            name: "Test".into(),
+        };
+        db.upsert_topic(&entry);
+        let found = db.get_topic_by_zalo("user123", 0);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().topic_id, 42);
+    }
+
+    #[tokio::test]
+    async fn test_db_msg_map_roundtrip() {
+        let db = crate::store::Database::open_in_memory().unwrap();
+        let entry = MsgMapEntry {
+            zalo_msg_id: "zmsg1".into(),
+            tg_msg_id: 100,
+            zalo_id: "thread1".into(),
+            thread_type: 0,
+            uid_from: "user1".into(),
+            ts: "1234567890".into(),
+            msg_type: "webchat".into(),
+            content: "hello".into(),
+            ttl: 0,
+        };
+        db.insert_msg_map(&entry);
+        assert_eq!(db.get_tg_msg_id("zmsg1"), Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_db_user_cache() {
+        let db = crate::store::Database::open_in_memory().unwrap();
+        db.upsert_user("uid1", "Alice");
+        assert_eq!(db.get_user_name("uid1"), Some("Alice".into()));
+        assert_eq!(db.get_user_name("uid2"), None);
     }
 }
