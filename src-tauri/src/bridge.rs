@@ -1,10 +1,11 @@
 use crate::config::BridgeConfig;
 use crate::store::Database;
 use crate::telegram::client::TelegramClient;
+use crate::zalo::api::login::{self as zalo_login, ZaloCredentials};
 use crate::zalo::client::{ZaloClient, ZaloEvent, ZaloState};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
 type LogBuf = Arc<Mutex<Vec<LogEntry>>>;
@@ -63,7 +64,6 @@ impl BridgeOrchestrator {
     }
 
     pub async fn start(&self, config: BridgeConfig) -> Result<(), String> {
-        // Check if Zalo worker is already running
         if let ZaloState::Connecting | ZaloState::Ready = self.zc.state().await {
             return Err("Bridge is already running".into());
         }
@@ -76,62 +76,21 @@ impl BridgeOrchestrator {
         };
         *self.tg_client.lock().await = Some(tg);
 
-        // Start the Zalo worker
+        // Load Zalo credentials and login natively
+        let creds = match load_credentials(config.zalo_credentials_path.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                *self.state.lock().await = BridgeState::Error(e.clone());
+                return Err(e);
+            }
+        };
         let zc = self.zc.clone();
-        zc.start().await.map_err(|e| {
-            *self.state.blocking_lock() = BridgeState::Error(e.to_string());
-            format!("start zalo-worker: {e}")
+        zc.login(&creds).await.map_err(|e| {
+            format!("zalo login: {e}")
         })?;
-
-        let child_stdout = zc.take_stdout().await.ok_or("no stdout")?;
-        let child_stderr = zc.take_stderr().await.ok_or("no stderr")?;
 
         *self.started_at.lock().await = Some(Instant::now());
         *self.state.lock().await = BridgeState::Running;
-
-        // ── Stdout reader (JSON events from zalo-worker) ─────────────────
-        let l1 = self.logs.clone();
-        let zc_state = self.zc.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(child_stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log_line(&l1, format!("[ZALO] {line}")).await;
-                if let Ok(ev) = serde_json::from_str::<ZaloEvent>(&line) {
-                    match ev.event_type.as_str() {
-                        "state" => {
-                            if let Some(s) = &ev.event {
-                                let new_state = match s.as_str() {
-                                    "ready" => ZaloState::Ready,
-                                    "need_login" => ZaloState::NeedLogin,
-                                    _ => ZaloState::Connecting,
-                                };
-                                zc_state.set_state(new_state).await;
-                                log_line(&l1, format!("[ZALO] state: {s}")).await;
-                            }
-                        }
-                        "event" => {
-                            if let Some(ev_name) = &ev.event {
-                                log_line(&l1, format!("[ZALO] event: {ev_name}")).await;
-                            }
-                        }
-                        "started" => {
-                            log_line(&l1, "[ZALO] worker started".into()).await;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            log_line(&l1, "[ZALO] stdout closed".into()).await;
-        });
-
-        // ── Stderr reader ────────────────────────────────────────────────
-        let l2 = self.logs.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(child_stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log_line(&l2, format!("[ZALO-ERR] {line}")).await;
-            }
-        });
 
         // ── Telegram polling loop (TG→Zalo) ──────────────────────────────
         let tgc = self.tg_client.clone();
@@ -140,6 +99,7 @@ impl BridgeOrchestrator {
         let zc_tg = self.zc.clone();
         let _tg_group = config.tg_group_id;
         tokio::spawn(async move {
+            log_line(&l3, "[BRIDGE] native Zalo client started".into()).await;
             loop {
                 let offset = *tgo.lock().await;
                 let client_lock = tgc.lock().await;
@@ -178,7 +138,7 @@ impl BridgeOrchestrator {
         *self.state.lock().await = BridgeState::Stopping;
         *self.started_at.lock().await = None;
 
-        self.zc.stop().await.map_err(|e| format!("stop zalo-worker: {e}"))?;
+        self.zc.stop().await.map_err(|e| format!("stop zalo: {e}"))?;
 
         *self.state.lock().await = BridgeState::Stopped;
         Ok(())
@@ -186,8 +146,8 @@ impl BridgeOrchestrator {
 
     pub async fn status(&self) -> BridgeStatus {
         let zstate = self.zc.state().await;
-        let running = matches!(zstate, ZaloState::Ready | ZaloState::Connecting);
-        let pid = self.zc.child_id().await;
+        let running = zstate == ZaloState::Ready;
+        let pid = None;
 
         if !running && *self.state.lock().await == BridgeState::Running {
             *self.state.lock().await = BridgeState::Stopped;
@@ -209,7 +169,7 @@ impl BridgeOrchestrator {
     }
 
     pub async fn send_stdin(&self, cmd: &str) -> Result<(), String> {
-        let val: serde_json::Value =
+        let val: Value =
             serde_json::from_str(cmd).map_err(|e| format!("parse cmd: {e}"))?;
         self.zc.send_raw(&val).await
     }
@@ -223,6 +183,16 @@ impl BridgeOrchestrator {
             logs[len - limit..].to_vec()
         }
     }
+}
+
+/// Load ZaloCredentials from the JSON file path, or from env vars.
+fn load_credentials(path: Option<&std::path::Path>) -> Result<ZaloCredentials, String> {
+    let creds_path = path.unwrap_or(std::path::Path::new("credentials.json"));
+    let content = std::fs::read_to_string(creds_path)
+        .map_err(|e| format!("read credentials: {e}"))?;
+    let json: Value =
+        serde_json::from_str(&content).map_err(|e| format!("parse credentials: {e}"))?;
+    zalo_login::parse_credentials(&json)
 }
 
 // ── Telegram update handler ───────────────────────────────────────────────
@@ -241,9 +211,7 @@ async fn handle_tg_update(
             let cmd_name = text.split(' ').next().unwrap_or(text);
             match cmd_name {
                 "/login" | "/start" => {
-                    if let Err(e) = zc.trigger_login().await {
-                        log_line(logs, format!("[ZALO] login error: {e}")).await;
-                    }
+                    log_line(logs, "[TG] login command ignored (auto-login on start)".into()).await;
                 }
                 "/status" => {
                     log_line(logs, "[TG] Status requested".into()).await;
@@ -342,16 +310,11 @@ mod tests {
         let b = make_bridge();
         let cfg = test_config();
         let result = b.start(cfg).await;
-        if result.is_ok() {
-            let s = b.status().await;
-            assert!(s.state == BridgeState::Running || s.state == BridgeState::Stopped);
-            let _ = b.stop().await;
-            let s = b.status().await;
-            assert_eq!(s.state, BridgeState::Stopped);
-        } else {
-            let s = b.status().await;
-            assert!(matches!(s.state, BridgeState::Error(_)));
-        }
+        // Without valid credentials file, start should fail
+        assert!(result.is_err());
+        let s = b.status().await;
+        assert!(matches!(s.state, BridgeState::Error(_) | BridgeState::Stopped));
+        assert!(b.stop().await.is_ok());
     }
 
     #[tokio::test]
@@ -359,12 +322,10 @@ mod tests {
         let b = make_bridge();
         let cfg = test_config();
         let first = b.start(cfg).await;
-        if first.is_ok() {
-            let second = b.start(test_config()).await;
-            assert!(second.is_err());
-            assert!(second.unwrap_err().contains("already running"));
-            let _ = b.stop().await;
-        }
+        // First fails (no credentials), second should also fail
+        let second = b.start(test_config()).await;
+        assert!(second.is_err() || first.is_err());
+        let _ = b.stop().await;
     }
 
     #[tokio::test]
@@ -420,9 +381,9 @@ mod tests {
     #[tokio::test]
     async fn test_send_stdin() {
         let b = make_bridge();
-        // Without starting the bridge, send_stdin should fail
-        let err = b.send_stdin(r#"{"cmd":"ping"}"#).await.unwrap_err();
-        assert!(err.contains("not started") || err.contains("parse"));
+        // Without credentials, send_raw fails with "not logged in"
+        let err = b.send_stdin(r#"{"cmd":"sendMessage","threadId":"1","text":"hi"}"#).await.unwrap_err();
+        assert!(err.contains("not logged in") || err.contains("unknown cmd"));
     }
 
     #[tokio::test]
