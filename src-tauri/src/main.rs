@@ -11,6 +11,7 @@ mod bridge;
 mod config;
 mod store;
 mod telegram;
+mod zalo;
 
 use bridge::BridgeOrchestrator;
 use config::AppConfig;
