@@ -1,3 +1,46 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_open_in_memory() {
+        let db = Database::open_in_memory().expect("failed to open in-memory db");
+        let conn = db.conn();
+        let version: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_schema_tables_exist() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+        for table in &["topics", "message_map", "user_cache", "group_members", "polls", "alias_cache"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table {table} should exist");
+        }
+    }
+
+    #[test]
+    fn test_schema_idempotent() {
+        // Running migrate twice should not error
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+        let version: i64 = db
+            .conn()
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+}
+
 use rusqlite::{Connection, Result as SqlResult};
 use std::path::Path;
 use std::sync::Mutex;
@@ -46,7 +89,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_topics_thread_type ON topics(thread_type);
 
             CREATE TABLE IF NOT EXISTS message_map (
-                zalo_msg_id TEXT NOT NULL,
+                zalo_msg_id TEXT PRIMARY KEY,
                 tg_msg_id INTEGER NOT NULL,
                 zalo_id TEXT NOT NULL,
                 thread_type INTEGER NOT NULL DEFAULT 0,

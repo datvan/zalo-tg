@@ -1,3 +1,86 @@
+#[cfg(test)]
+mod tests {
+    use crate::store::db::Database;
+    use crate::store::topics::TopicEntry;
+
+    fn setup() -> Database {
+        Database::open_in_memory().expect("db")
+    }
+
+    #[test]
+    fn test_list_topics_empty() {
+        let db = setup();
+        assert!(db.list_topics().is_empty());
+        assert_eq!(db.topic_count(), 0);
+    }
+
+    #[test]
+    fn test_upsert_and_list() {
+        let db = setup();
+        let entry = TopicEntry { topic_id: 1, zalo_id: "zid1".into(), thread_type: 2, name: "Test Group".into() };
+        db.upsert_topic(&entry);
+        assert_eq!(db.topic_count(), 1);
+
+        let topics = db.list_topics();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name, "Test Group");
+    }
+
+    #[test]
+    fn test_upsert_replace() {
+        let db = setup();
+        db.upsert_topic(&TopicEntry { topic_id: 1, zalo_id: "zid1".into(), thread_type: 2, name: "Old".into() });
+        db.upsert_topic(&TopicEntry { topic_id: 1, zalo_id: "zid1".into(), thread_type: 2, name: "New".into() });
+        let t = db.get_topic_by_id(1).unwrap();
+        assert_eq!(t.name, "New");
+    }
+
+    #[test]
+    fn test_get_by_zalo() {
+        let db = setup();
+        db.upsert_topic(&TopicEntry { topic_id: 5, zalo_id: "abc".into(), thread_type: 1, name: "X".into() });
+        let t = db.get_topic_by_zalo("abc", 1).unwrap();
+        assert_eq!(t.topic_id, 5);
+        assert!(db.get_topic_by_zalo("abc", 2).is_none());
+    }
+
+    #[test]
+    fn test_remove() {
+        let db = setup();
+        db.upsert_topic(&TopicEntry { topic_id: 1, zalo_id: "z1".into(), thread_type: 0, name: "A".into() });
+        db.remove_topic(1);
+        assert_eq!(db.topic_count(), 0);
+    }
+
+    #[test]
+    fn test_remove_by_zalo() {
+        let db = setup();
+        db.upsert_topic(&TopicEntry { topic_id: 1, zalo_id: "z1".into(), thread_type: 0, name: "A".into() });
+        db.remove_topic_by_zalo("z1", 0);
+        assert_eq!(db.topic_count(), 0);
+        // wrong thread_type should not remove
+        db.upsert_topic(&TopicEntry { topic_id: 2, zalo_id: "z2".into(), thread_type: 1, name: "B".into() });
+        db.remove_topic_by_zalo("z2", 0);
+        assert_eq!(db.topic_count(), 1);
+    }
+
+    #[test]
+    fn test_multiple_topics() {
+        let db = setup();
+        for i in 0..5 {
+            db.upsert_topic(&TopicEntry {
+                topic_id: i,
+                zalo_id: format!("z{i}"),
+                thread_type: i % 2,
+                name: format!("Topic {i}"),
+            });
+        }
+        assert_eq!(db.topic_count(), 5);
+        let list = db.list_topics();
+        assert_eq!(list.len(), 5);
+    }
+}
+
 use crate::store::db::Database;
 use serde::{Deserialize, Serialize};
 

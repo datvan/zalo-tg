@@ -1,3 +1,139 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_parse_env_empty() {
+        let vars = parse_env("");
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_comment() {
+        let vars = parse_env("# comment\n# another");
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_simple() {
+        let vars = parse_env("KEY=value\nFOO=bar");
+        assert_eq!(vars.get("KEY").unwrap(), "value");
+        assert_eq!(vars.get("FOO").unwrap(), "bar");
+    }
+
+    #[test]
+    fn test_parse_env_whitespace() {
+        let vars = parse_env("  KEY = value with space  ");
+        assert_eq!(vars.get("KEY").unwrap(), "value with space");
+    }
+
+    #[test]
+    fn test_parse_env_blank_lines() {
+        let vars = parse_env("A=1\n\n\nB=2\n");
+        assert_eq!(vars.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_env_empty_value() {
+        let vars = parse_env("EMPTY=");
+        assert_eq!(vars.get("EMPTY").unwrap(), "");
+    }
+
+    #[test]
+    fn test_load_merged_env_base_only() {
+        let dir = std::env::temp_dir().join("test_zalotg_config");
+        let _ = std::fs::create_dir_all(&dir);
+        let base = dir.join(".env");
+        std::fs::write(&base, "A=1\nB=2\n").unwrap();
+        let local = dir.join(".env.local");
+
+        let (vars, sources) = load_merged_env(&base, &local);
+        assert_eq!(vars.get("A").unwrap(), "1");
+        assert_eq!(vars.get("B").unwrap(), "2");
+        assert_eq!(sources.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_merged_env_local_overrides() {
+        let dir = std::env::temp_dir().join("test_zalotg_config_local");
+        let _ = std::fs::create_dir_all(&dir);
+        let base = dir.join(".env");
+        std::fs::write(&base, "A=1\nB=2\n").unwrap();
+        let local = dir.join(".env.local");
+        std::fs::write(&local, "B=overridden\nC=3\n").unwrap();
+
+        let (vars, sources) = load_merged_env(&base, &local);
+        assert_eq!(vars.get("A").unwrap(), "1");
+        assert_eq!(vars.get("B").unwrap(), "overridden"); // local wins
+        assert_eq!(vars.get("C").unwrap(), "3");
+        assert_eq!(sources.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_merged_env_neither_exists() {
+        let dir = std::env::temp_dir().join("test_zalotg_config_nonexist");
+        let base = dir.join(".env");
+        let local = dir.join(".env.local");
+        let (vars, sources) = load_merged_env(&base, &local);
+        assert!(vars.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_bridge_config_from_vars() {
+        let mut vars = HashMap::new();
+        vars.insert("TG_TOKEN".into(), "123:abc".into());
+        vars.insert("TG_GROUP_ID".into(), "-100123".into());
+        vars.insert("DATA_DIR".into(), "/custom/data".into());
+        vars.insert("ZALO_CREDENTIALS_PATH".into(), "/path/creds".into());
+        vars.insert("LOCAL_BOT_API".into(), "http://localhost:8081".into());
+        vars.insert("ZALO_SKIP_MUTED_GROUPS".into(), "true".into());
+        vars.insert("ZALO_MUTE_SILENT".into(), "1".into());
+
+        let cfg = BridgeConfig::from_vars(&vars);
+        assert_eq!(cfg.tg_token, "123:abc");
+        assert_eq!(cfg.tg_group_id, -100123);
+        assert_eq!(cfg.data_dir, PathBuf::from("/custom/data"));
+        assert_eq!(cfg.zalo_credentials_path, Some(PathBuf::from("/path/creds")));
+        assert_eq!(cfg.local_bot_api, Some("http://localhost:8081".into()));
+        assert!(cfg.skip_muted_groups);
+        assert!(cfg.mute_silent);
+    }
+
+    #[test]
+    fn test_bridge_config_defaults() {
+        let vars = HashMap::new();
+        let cfg = BridgeConfig::from_vars(&vars);
+        assert_eq!(cfg.tg_token, "");
+        assert_eq!(cfg.tg_group_id, 0);
+        assert_eq!(cfg.data_dir, PathBuf::from(PROJECT_ROOT).join("data"));
+        assert!(cfg.zalo_credentials_path.is_none());
+        assert!(cfg.local_bot_api.is_none());
+        assert!(!cfg.skip_muted_groups);
+        assert!(!cfg.mute_silent);
+    }
+
+    #[test]
+    fn test_save_env_roundtrip() {
+        let dir = std::env::temp_dir().join("test_zalotg_save_env");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(".env.test");
+        let mut vars = HashMap::new();
+        vars.insert("A".into(), "1".into());
+        vars.insert("B".into(), "hello world".into());
+        save_env(&path, &vars).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("A=1"));
+        assert!(content.contains("B=hello world"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

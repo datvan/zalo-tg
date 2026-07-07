@@ -1,3 +1,266 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn mock_body() -> serde_json::Value {
+        serde_json::json!({"ok": true, "result": {
+            "message_id": 100,
+            "chat": {"id": -123, "type": "supergroup", "title": "Test"},
+            "text": "hello",
+            "date": 1700000000
+        }})
+    }
+
+    #[tokio::test]
+    async fn test_new_default_api() {
+        let client = TelegramClient::new("token123");
+        assert!(client.base_url.contains("api.telegram.org"));
+    }
+
+    #[tokio::test]
+    async fn test_new_with_local_api() {
+        let client = TelegramClient::new_with_local("token123", "http://localhost:8081/bot");
+        assert_eq!(client.base_url, "http://localhost:8081/bot");
+    }
+
+    #[tokio::test]
+    async fn test_local_api_url_strips_trailing_slash() {
+        let client = TelegramClient::new_with_local("t", "http://localhost:8081/bot/");
+        assert_eq!(client.base_url, "http://localhost:8081/bot");
+    }
+
+    #[tokio::test]
+    async fn test_send_message_success() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/sendMessage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_body()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let params = SendMessageParams {
+            chat_id: -123,
+            text: "hello".into(),
+            parse_mode: None,
+            message_thread_id: None,
+            reply_to_message_id: None,
+            disable_notification: None,
+            reply_markup: None,
+        };
+        let msg = client.send_message(&params).await.unwrap();
+        assert_eq!(msg.message_id, 100);
+        assert_eq!(msg.text, Some("hello".into()));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_error_response() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/sendMessage"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": false, "description": "bot was blocked"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let params = SendMessageParams {
+            chat_id: -1,
+            text: "hi".into(),
+            parse_mode: None,
+            message_thread_id: None,
+            reply_to_message_id: None,
+            disable_notification: None,
+            reply_markup: None,
+        };
+        let err = client.send_message(&params).await.unwrap_err();
+        assert!(err.contains("bot was blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_http_error() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/sendMessage"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let params = SendMessageParams {
+            chat_id: 0,
+            text: "x".into(),
+            parse_mode: None,
+            message_thread_id: None,
+            reply_to_message_id: None,
+            disable_notification: None,
+            reply_markup: None,
+        };
+        let result = client.send_message(&params).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_message() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/deleteMessage"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let ok = client.delete_message(-100, 42).await.unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_get_chat_member() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getChatMember"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": {
+                        "user": {"id": 123, "is_bot": false, "first_name": "Alice", "username": "alice_bot"},
+                        "status": "member"
+                    }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let member = client.get_chat_member(-100, 123).await.unwrap();
+        assert_eq!(member.user.first_name, "Alice");
+        assert_eq!(member.status, "member");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_and_url() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getFile"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": {
+                        "file_id": "fid123",
+                        "file_unique_id": "unq456",
+                        "file_size": 1024,
+                        "file_path": "documents/file.pdf"
+                    }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let f = client.get_file("fid123").await.unwrap();
+        assert_eq!(f.file_path, Some("documents/file.pdf".into()));
+
+        let url = client.file_url("documents/file.pdf");
+        let expected_base = client.base_url.replace("bot", "file/bot");
+        assert_eq!(url, format!("{expected_base}/documents/file.pdf"));
+    }
+
+    #[tokio::test]
+    async fn test_create_forum_topic() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/createForumTopic"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": {
+                        "message_thread_id": 42,
+                        "name": "Test Topic",
+                        "icon_color": 7322096
+                    }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let topic = client.create_forum_topic(-100, "Test Topic").await.unwrap();
+        assert_eq!(topic.message_thread_id, 42);
+        assert_eq!(topic.name, "Test Topic");
+    }
+
+    #[tokio::test]
+    async fn test_set_message_reaction() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/setMessageReaction"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let reaction = vec![ReactionParam {
+            reaction_type: "emoji".into(),
+            emoji: "👍".into(),
+        }];
+        let ok = client.set_message_reaction(-100, 42, Some(reaction)).await.unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_edit_message_text() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/editMessageText"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_body()))
+            .mount(&mock_server)
+            .await;
+
+        let params = EditMessageTextParams {
+            chat_id: -123,
+            message_id: 100,
+            text: "edited".into(),
+            parse_mode: None,
+            reply_markup: None,
+        };
+        let msg = client.edit_message_text(&params).await.unwrap();
+        assert_eq!(msg.message_id, 100);
+    }
+
+    #[tokio::test]
+    async fn test_send_chat_action() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/sendChatAction"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let ok = client.send_chat_action(-100, "typing").await.unwrap();
+        assert!(ok);
+    }
+}
+
 use reqwest::Client as HttpClient;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

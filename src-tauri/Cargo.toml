@@ -21,5 +21,8 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 
+[dev-dependencies]
+wiremock = "0.6"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
