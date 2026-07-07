@@ -1,21 +1,34 @@
+/* ═══════════════════════════════════════════════════════════
+   zalo-tg Bridge — Frontend Controller
+   ═══════════════════════════════════════════════════════════ */
+
 const invoke = window.__TAURI__?.core?.invoke;
-const $ = (s, p) => (p || document).querySelector(s);
-const $$ = (s, p) => (p || document).querySelectorAll(s);
+const $ = (s, p = document) => p.querySelector(s);
+const $$ = (s, p = document) => Array.from(p.querySelectorAll(s));
 
 const state = {
-  bridge: false, pid: null, uptime: null,
-  zalo: false, tg: false,
-  msgsToday: 0, msgLog: [], logs: [],
-  chartData: [],
+  bridge: false,
+  uptime: null,
+  msgsToday: 0,
+  msgLog: [],
+  logs: [],
+  chartData: new Array(60).fill(0),
   activity: [],
   config: null,
+  contacts: { friends: [], groups: [] },
+  contactTab: 'friends',
+  prevRunning: false,
+  logPaused: false,
+  lastLogCount: 0,
 };
 
+/* ── Boot ─────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', async () => {
   if (!invoke) { showFallback(); return; }
   setupNav();
   setupControls();
   setupSettings();
+  setupContacts();
   await loadConfig();
   setupDragDrop();
   initChart();
@@ -23,24 +36,35 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function showFallback() {
-  document.getElementById('app').innerHTML =
-    '<div style="padding:40px;text-align:center;color:#5c6288;font-family:system-ui">zalo-tg Bridge</div>';
+  $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Tauri API not available. Run in Tauri context.</div>';
 }
 
+/* ── Navigation ───────────────────────────────────────────── */
 function setupNav() {
-  const views = { dashboard: 1, messages: 1, settings: 1 };
+  const views = ['dashboard', 'messages', 'contacts', 'settings'];
   $$('.nav-item[data-view]').forEach(item => {
     item.addEventListener('click', () => {
-      if (!views[item.dataset.view]) return;
-      $$('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
-      item.classList.add('active');
-      $$('.view').forEach(v => v.classList.remove('active'));
-      const view = $(`#view-${item.dataset.view}`);
-      if (view) view.classList.add('active');
+      const v = item.dataset.view;
+      if (!views.includes(v)) return;
+      switchView(v);
     });
   });
 }
 
+function switchView(name) {
+  $$('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === name));
+  $$('.view').forEach(v => v.classList.remove('active'));
+  const view = $(`#view-${name}`);
+  if (!view) return;
+  view.classList.add('active');
+  view.querySelectorAll('.reveal').forEach(el => {
+    el.style.animation = 'none';
+    el.offsetHeight;
+    el.style.animation = '';
+  });
+}
+
+/* ── Polling ──────────────────────────────────────────────── */
 let pollTimer;
 function startPolling() { poll(); pollTimer = setInterval(poll, 1500); }
 
@@ -56,33 +80,48 @@ async function poll() {
   } catch (_) {}
 }
 
-let prevRunning = false;
-
+/* ── Status Update ────────────────────────────────────────── */
 function updateStatus(s) {
   state.bridge = s.running;
-  state.pid = s.pid;
   state.uptime = s.uptime_secs;
 
-  const badge = $('#global-badge');
-  badge.textContent = s.running ? '● RUNNING' : '● STOPPED';
-  badge.className = 'badge ' + (s.running ? 'running' : 'stopped');
+  const isRunning = s.running;
+  const stateLabel = isRunning ? 'running' : (s.state === 'Starting' ? 'starting' : 'stopped');
 
-  const dot = $('#footer-status');
-  dot.textContent = s.running ? '● Running' : '● Stopped';
-  dot.className = 'status-dot ' + (s.running ? 'running anim-pulse' : 'stopped');
-  $('#footer-uptime').textContent = s.running && s.uptime_secs != null ? fmtUptime(s.uptime_secs) : '—';
+  const badge = $('#global-badge');
+  badge.textContent = isRunning ? 'Running' : 'Stopped';
+  badge.className = 'pill ' + (isRunning ? 'pill-running' : 'pill-stopped');
+
+  const footStatus = $('#footer-status');
+  footStatus.textContent = isRunning ? 'Running' : 'Stopped';
+  footStatus.className = 'footer-status ' + (isRunning ? 'footer-running' : 'footer-stopped');
+
+  $('#footer-uptime').textContent = isRunning && state.uptime != null ? fmtUptime(state.uptime) : '—';
+
+  const miniDot = $('#mini-dot');
+  miniDot.className = 'mini-dot mini-' + stateLabel;
 
   const bEl = $('#stat-bridge');
-  bEl.textContent = s.running ? 'Running' : 'Stopped';
-  bEl.style.color = s.running ? 'var(--green)' : 'var(--text-muted)';
-  const bridgeDot = $('.stat-icon .dot-indicator');
-  if (bridgeDot) bridgeDot.className = 'dot-indicator ' + (s.running ? 'green' : 'red');
+  bEl.textContent = isRunning ? 'Running' : 'Stopped';
+
+  const bridgePulse = $('#stat-pulse-bridge');
+  bridgePulse.className = 'stat-pulse ' + (isRunning ? 'green' : '');
+
+  const dashSub = $('#dash-subtitle');
+  dashSub.textContent = isRunning
+    ? 'Bridge is live — forwarding messages'
+    : 'Bridge offline — press Start to connect';
 
   detectPlatform();
 
-  if (s.running && !prevRunning) addActivity('Bridge started', 'start');
-  else if (!s.running && prevRunning) addActivity('Bridge stopped', 'stop');
-  prevRunning = s.running;
+  if (isRunning && !state.prevRunning) {
+    addActivity('Bridge started', 'start');
+    showToast('Bridge started successfully', 'success');
+  } else if (!isRunning && state.prevRunning) {
+    addActivity('Bridge stopped', 'stop');
+    showToast('Bridge stopped', 'info');
+  }
+  state.prevRunning = isRunning;
 }
 
 function detectPlatform() {
@@ -92,49 +131,29 @@ function detectPlatform() {
   const tgActive = recent.some(l => /telegram|telegraf|tg/i.test(l.text) && !/ZALO_TG/.test(l.text));
   const zEl = $('#stat-zalo');
   const tEl = $('#stat-tg');
+  const zPulse = $('#stat-pulse-zalo');
+  const tPulse = $('#stat-pulse-tg');
+
   if (!state.bridge) {
-    zEl.textContent = '—'; zEl.style.color = 'var(--text-muted)';
-    tEl.textContent = '—'; tEl.style.color = 'var(--text-muted)';
-    const zi = $('#stat-card-zalo .stat-icon');
-    const ti = $('#stat-card-tg .stat-icon');
-    if (zi) zi.style.background = 'var(--bg-surface)';
-    if (ti) ti.style.background = 'var(--bg-surface)';
+    zEl.textContent = '—'; tEl.textContent = '—';
+    zPulse.className = 'stat-pulse'; tPulse.className = 'stat-pulse';
     return;
   }
   const zConnected = zaloActive && !recent.some(l => l.level === 'error' && /zalo/i.test(l.text));
   const tConnected = tgActive && !recent.some(l => l.level === 'error' && /telegram/i.test(l.text));
   zEl.textContent = zConnected ? 'Connected' : 'Waiting…';
-  zEl.style.color = zConnected ? 'var(--green)' : 'var(--yellow)';
   tEl.textContent = tConnected ? 'Connected' : 'Waiting…';
-  tEl.style.color = tConnected ? 'var(--green)' : 'var(--yellow)';
-  const zi = $('#stat-card-zalo .stat-icon');
-  const ti = $('#stat-card-tg .stat-icon');
-  if (zi) zi.style.background = zConnected ? 'var(--green-dim)' : 'var(--bg-surface)';
-  if (ti) ti.style.background = tConnected ? 'var(--green-dim)' : 'var(--bg-surface)';
+  zPulse.className = 'stat-pulse ' + (zConnected ? 'green' : 'amber');
+  tPulse.className = 'stat-pulse ' + (tConnected ? 'green' : 'amber');
 }
 
-function extractMessages(logs) {
-  const msgs = []; const seen = new Set();
-  for (const l of logs) {
-    const match = l.text.match(/(?:Message|Bridging|Forwarding|→|<-|->).{0,60}/i);
-    if (!match) continue;
-    const key = l.timestamp + l.text.slice(0, 40);
-    if (seen.has(key)) continue; seen.add(key);
-    const dir = /telegram.*zalo|tg.*→|tg.*<-/i.test(l.text) ? 'tz' :
-                /zalo.*telegram|zalo.*→|zalo.*->/i.test(l.text) ? 'zt' : null;
-    if (!dir) continue;
-    msgs.push({ dir, text: match[0], time: l.timestamp });
-  }
-  return msgs;
-}
-
+/* ── Chart ────────────────────────────────────────────────── */
 let chartCtx = null;
 function initChart() {
   const canvas = $('#msg-chart');
   if (!canvas) return;
-  chartCtx = canvas.getContext('2d');
-  for (let i = 0; i < 60; i++) state.chartData.push(0);
   resizeChart();
+  setInterval(updateChartTick, 1000);
 }
 
 function resizeChart() {
@@ -148,18 +167,24 @@ function resizeChart() {
   canvas.height = 160 * dpr;
   canvas.style.width = w + 'px';
   canvas.style.height = '160px';
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  chartCtx = ctx;
+  chartCtx = canvas.getContext('2d');
+  chartCtx.scale(dpr, dpr);
+  drawChart();
+}
+
+let chartTickAccum = 0;
+function updateChartTick() {
+  chartTickAccum++;
+  if (chartTickAccum < 1) return;
+  chartTickAccum = 0;
   drawChart();
 }
 
 function drawChart() {
   const ctx = chartCtx;
   if (!ctx) return;
-  const canvas = ctx.canvas;
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.width / dpr;
+  const w = ctx.canvas.width / dpr;
   const h = 160;
   const data = state.chartData;
   const len = data.length;
@@ -172,7 +197,8 @@ function drawChart() {
   const max = Math.max(1, ...data);
   const stepX = cw / (len - 1);
 
-  ctx.strokeStyle = 'rgba(38,43,64,0.4)';
+  /* Grid lines */
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + (ch / 4) * i;
@@ -184,10 +210,11 @@ function drawChart() {
     y: pad.t + ch - (v / max) * ch
   }));
 
+  /* Fill gradient */
   const grad = ctx.createLinearGradient(0, pad.t, 0, h - pad.b);
-  grad.addColorStop(0, 'rgba(34,211,238,0.25)');
-  grad.addColorStop(0.5, 'rgba(34,211,238,0.08)');
-  grad.addColorStop(1, 'rgba(34,211,238,0.01)');
+  grad.addColorStop(0, 'rgba(99,102,241,0.3)');
+  grad.addColorStop(0.5, 'rgba(139,92,246,0.1)');
+  grad.addColorStop(1, 'rgba(99,102,241,0.01)');
   ctx.beginPath();
   pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
   ctx.lineTo(pad.l + (len - 1) * stepX, h - pad.b);
@@ -196,35 +223,39 @@ function drawChart() {
   ctx.fillStyle = grad;
   ctx.fill();
 
-  ctx.shadowColor = 'rgba(34,211,238,0.3)';
-  ctx.shadowBlur = 4;
+  /* Glow stroke */
+  ctx.shadowColor = 'rgba(99,102,241,0.4)';
+  ctx.shadowBlur = 8;
   ctx.beginPath();
   pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-  ctx.strokeStyle = 'rgba(34,211,238,0.4)';
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(99,102,241,0.3)';
+  ctx.lineWidth = 4;
+  ctx.lineJoin = 'round';
   ctx.stroke();
   ctx.shadowBlur = 0;
 
+  /* Crisp stroke */
   ctx.beginPath();
   pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-  ctx.strokeStyle = '#22D3EE';
+  ctx.strokeStyle = '#818cf8';
   ctx.lineWidth = 1.5;
-  ctx.lineJoin = 'round';
   ctx.stroke();
 
+  /* Last point indicator */
   const last = data[len - 1];
   if (last > 0) {
     const p = pts[len - 1];
-    ctx.beginPath(); ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#22D3EE'; ctx.fill();
-    ctx.shadowColor = 'rgba(34,211,238,0.5)';
-    ctx.shadowBlur = 6;
-    ctx.beginPath(); ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#818cf8'; ctx.fill();
+    ctx.shadowColor = 'rgba(129,140,248,0.6)';
+    ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#c7d2fe'; ctx.fill();
     ctx.shadowBlur = 0;
   }
 
-  ctx.fillStyle = '#5c6288';
+  /* Y-axis labels */
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
   ctx.font = '9px -apple-system, sans-serif';
   ctx.textAlign = 'right';
   for (let i = 0; i <= 4; i++) {
@@ -237,15 +268,17 @@ function drawChart() {
 function pushChartPoint(val) {
   state.chartData.push(val);
   if (state.chartData.length > 60) state.chartData.shift();
-  drawChart();
 }
 
-const ACTIVITY_ICONS = { msg:'💬', start:'▶', stop:'■', error:'✕', warn:'⚠', info:'●', default:'·' };
+/* ── Activity Feed ────────────────────────────────────────── */
+const ACTIVITY_COLORS = {
+  msg: '#818cf8', start: '#34d399', stop: '#fb7185',
+  error: '#fb7185', warn: '#fbbf24', info: '#38bdf8', default: '#6b6c7e'
+};
 
-function addActivity(text, type) {
-  const now = new Date();
-  const time = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-  state.activity.unshift({ text, time, type: type || 'info' });
+function addActivity(text, type = 'info') {
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  state.activity.unshift({ text, time, type });
   if (state.activity.length > 50) state.activity.pop();
   renderActivity();
 }
@@ -254,37 +287,42 @@ function renderActivity() {
   const feed = $('#activity-feed');
   if (!feed) return;
   if (state.activity.length === 0) {
-    feed.innerHTML = '<div class="empty-state">Waiting for bridge events…</div>';
+    feed.innerHTML = makeEmptyState('Waiting for bridge events…');
     $('#activity-count').textContent = '0';
     return;
   }
   $('#activity-count').textContent = String(state.activity.length);
-  feed.innerHTML = state.activity.map(a =>
-    `<div class="activity-item">
-      <span class="icon">${ACTIVITY_ICONS[a.type] || ACTIVITY_ICONS.default}</span>
+  feed.innerHTML = state.activity.map(a => {
+    const color = ACTIVITY_COLORS[a.type] || ACTIVITY_COLORS.default;
+    return `<div class="activity-item">
+      <span class="activity-icon" style="background:${color};box-shadow:0 0 6px ${color}"></span>
       <span class="text">${esc(a.text)}</span>
-      <span class="time">${a.time}</span>
-    </div>`
-  ).join('');
+      <span class="activity-time">${a.time}</span>
+    </div>`;
+  }).join('');
 }
 
-let lastLogCount = 0;
+/* ── Log Rendering ────────────────────────────────────────── */
 function renderLogs() {
   const container = $('#log-container');
   if (!container || !state.logs.length) return;
-  if (state.logs.length === lastLogCount) return;
-  lastLogCount = state.logs.length;
+  if (state.logs.length === state.lastLogCount) return;
+  state.lastLogCount = state.logs.length;
 
-  const auto = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
+  const auto = !state.logPaused;
   container.innerHTML = state.logs.slice(-200).map(l =>
-    `<div class="log-entry ${l.level}">
+    `<div class="log-line">
       <span class="log-time">${esc(l.timestamp)}</span>
-      <span class="log-level ${l.level}">${esc(l.level)}</span>
+      <span class="log-level log-level-${esc(l.level || 'INFO')}">${esc(l.level || 'INFO')}</span>
       <span class="log-text">${esc(l.text)}</span>
     </div>`
   ).join('');
   if (auto) container.scrollTop = container.scrollHeight;
 
+  const lcLabel = $('#log-count-label');
+  if (lcLabel) lcLabel.textContent = `${state.logs.length} lines`;
+
+  /* Extract message events */
   const msgs = extractMessages(state.logs);
   if (msgs.length > state.msgLog.length) {
     for (let i = state.msgLog.length; i < msgs.length; i++) {
@@ -305,44 +343,50 @@ function renderLogs() {
   updateFooterStats();
 }
 
-function updateFooterStats() {
-  const el = $('#footer-stats');
-  if (el) el.textContent = state.msgsToday + ' msgs today';
+function extractMessages(logs) {
+  const msgs = []; const seen = new Set();
+  for (const l of logs) {
+    const match = l.text.match(/(?:Message|Bridging|Forwarding|→|<-|->).{0,60}/i);
+    if (!match) continue;
+    const key = l.timestamp + l.text.slice(0, 40);
+    if (seen.has(key)) continue; seen.add(key);
+    const dir = /telegram.*zalo|tg.*→|tg.*<-/i.test(l.text) ? 'tz' :
+                /zalo.*telegram|zalo.*→|zalo.*->/i.test(l.text) ? 'zt' : null;
+    if (!dir) continue;
+    msgs.push({ dir, text: match[0], time: l.timestamp });
+  }
+  return msgs;
 }
 
+/* ── Messages View ────────────────────────────────────────── */
 function renderMessages() {
   const list = $('#msg-list');
-  const total = $('#msg-total');
-  const zt = $('#msg-zt');
-  const tz = $('#msg-tz');
   if (!list) return;
 
   const filterZt = $('#filter-zt')?.checked ?? true;
   const filterTz = $('#filter-tz')?.checked ?? true;
   const query = ($('#msg-search')?.value || '').toLowerCase();
 
-  let filtered = state.msgLog.filter(m => {
+  const filtered = state.msgLog.filter(m => {
     if (m.dir === 'zt' && !filterZt) return false;
     if (m.dir === 'tz' && !filterTz) return false;
     if (query && !m.text.toLowerCase().includes(query)) return false;
     return true;
   });
 
-  if (total) total.textContent = String(state.msgLog.length);
-  if (zt) zt.textContent = String(state.msgLog.filter(m => m.dir === 'zt').length);
-  if (tz) tz.textContent = String(state.msgLog.filter(m => m.dir === 'tz').length);
+  $('#msg-total').textContent = String(state.msgLog.length);
+  $('#msg-zt').textContent = String(state.msgLog.filter(m => m.dir === 'zt').length);
+  $('#msg-tz').textContent = String(state.msgLog.filter(m => m.dir === 'tz').length);
 
   if (filtered.length === 0) {
-    list.innerHTML = '<div class="empty-state">No messages match your filters</div>';
+    list.innerHTML = makeEmptyState('No messages match your filters');
     return;
   }
   list.innerHTML = filtered.slice(0, 100).map(m =>
-    `<div class="msg-item anim-fade-in">
-      <span class="msg-direction ${m.dir}">${m.dir === 'zt' ? 'Z→T' : 'T→Z'}</span>
-      <div class="msg-body">
-        <div class="msg-text">${esc(m.text)}</div>
-        <div class="msg-meta"><span>${esc(m.time)}</span></div>
-      </div>
+    `<div class="msg-row">
+      <span class="msg-direction"><span class="dir-badge dir-${m.dir}">${m.dir === 'zt' ? 'Z→T' : 'T→Z'}</span></span>
+      <span class="msg-content">${esc(m.text)}</span>
+      <span class="msg-meta">${esc(m.time)}</span>
     </div>`
   ).join('');
 }
@@ -352,62 +396,101 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'msg-search') renderMessages();
+  if (e.target.id === 'contact-search') renderContacts();
 });
 
-function setupControls() {
-  const start = $('#btn-start');
-  const stop = $('#btn-stop');
-  if (start) start.addEventListener('click', async () => {
-    start.disabled = true; start.textContent = 'Starting…';
-    try { await invoke('start_bridge'); addActivity('Starting bridge…', 'info'); }
-    catch (e) { addActivity('Start failed: ' + e, 'error'); }
-    start.disabled = false; start.textContent = 'Start Bridge';
-  });
-  if (stop) stop.addEventListener('click', async () => {
-    stop.disabled = true; stop.textContent = 'Stopping…';
-    try { await invoke('stop_bridge'); addActivity('Stopping bridge…', 'info'); }
-    catch (e) { addActivity('Stop failed: ' + e, 'error'); }
-    stop.disabled = false; stop.textContent = 'Stop';
-  });
-  const clearBtn = $('#btn-clear-logs');
-  if (clearBtn) clearBtn.addEventListener('click', () => {
-    state.logs = []; lastLogCount = 0; const c = $('#log-container');
-    if (c) c.innerHTML = '';
-  });
-  const trayBtn = $('#btn-toggle-tray');
-  if (trayBtn) trayBtn.addEventListener('click', async () => {
-    try { await invoke('toggle_window'); } catch (_) {}
-  });
-  const lc = $('#log-container');
-  if (lc) {
-    lc.addEventListener('scroll', () => {
-      const el = lc;
-      const was = window.__logPaused;
-      window.__logPaused = el.scrollTop + el.clientHeight < el.scrollHeight - 20;
+/* ── Contacts View ────────────────────────────────────────── */
+function setupContacts() {
+  $$('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      $$('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      state.contactTab = tab.dataset.tab;
+      renderContacts();
     });
-  }
+  });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  // override renderLogs to use __logPaused
-  const origRender = renderLogs;
-  renderLogs = function() {
-    const container = $('#log-container');
-    if (!container || !state.logs.length) return;
-    if (state.logs.length === lastLogCount) return;
-    lastLogCount = state.logs.length;
-    const auto = !window.__logPaused || state.logs.length - lastLogCount + 200 > lastLogCount;
-    container.innerHTML = state.logs.slice(-200).map(l =>
-      `<div class="log-entry ${l.level}">
-        <span class="log-time">${esc(l.timestamp)}</span>
-        <span class="log-level ${l.level}">${esc(l.level)}</span>
-        <span class="log-text">${esc(l.text)}</span>
-      </div>`
-    ).join('');
-    if (auto) container.scrollTop = container.scrollHeight;
-  };
-});
+function renderContacts() {
+  const list = $('#contact-list');
+  if (!list) return;
+  const query = ($('#contact-search')?.value || '').toLowerCase();
+  const items = state.contactTab === 'friends' ? state.contacts.friends : state.contacts.groups;
 
+  const filtered = items.filter(c =>
+    !query || (c.name || '').toLowerCase().includes(query)
+  );
+
+  if (filtered.length === 0) {
+    list.innerHTML = makeEmptyState(
+      items.length === 0 ? 'Start the bridge to load contacts' : 'No matches'
+    );
+    return;
+  }
+
+  list.className = 'contact-grid';
+  list.innerHTML = filtered.map((c, i) => {
+    const initial = (c.name || '?').charAt(0).toUpperCase();
+    const isGroup = state.contactTab === 'groups';
+    const sub = isGroup ? `${c.members || 0} members` : c.alias || 'Friend';
+    return `<div class="contact-card" style="animation-delay:${i * 30}ms">
+      <div class="contact-avatar ${isGroup ? 'group' : ''}">${esc(initial)}</div>
+      <div class="contact-info">
+        <div class="contact-name">${esc(c.name)}</div>
+        <div class="contact-sub">${esc(sub)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ── Controls ─────────────────────────────────────────────── */
+function setupControls() {
+  $('#btn-start')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-spinner"></span><span>Starting…</span>';
+    try {
+      await invoke('start_bridge');
+      addActivity('Starting bridge…', 'info');
+    } catch (err) {
+      showToast('Start failed: ' + err, 'error');
+      addActivity('Start failed: ' + err, 'error');
+    }
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M5 3l12 7-12 7V3z" fill="currentColor"/></svg><span>Start Bridge</span>';
+  });
+
+  $('#btn-stop')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-spinner"></span><span>Stopping…</span>';
+    try {
+      await invoke('stop_bridge');
+      addActivity('Stopping bridge…', 'info');
+    } catch (err) {
+      showToast('Stop failed: ' + err, 'error');
+    }
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none"><rect x="5" y="5" width="10" height="10" rx="2" fill="currentColor"/></svg><span>Stop</span>';
+  });
+
+  $('#btn-clear-logs')?.addEventListener('click', () => {
+    state.logs = []; state.lastLogCount = 0;
+    $('#log-container').innerHTML = '';
+    $('#log-count-label').textContent = '0 lines';
+  });
+
+  $('#btn-toggle-tray')?.addEventListener('click', async () => {
+    try { await invoke('toggle_window'); } catch (_) {}
+  });
+
+  const lc = $('#log-container');
+  lc?.addEventListener('scroll', () => {
+    state.logPaused = lc.scrollTop + lc.clientHeight < lc.scrollHeight - 20;
+  });
+}
+
+/* ── Settings ─────────────────────────────────────────────── */
 function setupSettings() {
   $$('.theme-opt').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -422,45 +505,33 @@ function setupSettings() {
   $('#btn-add-var')?.addEventListener('click', addEnvRow);
 }
 
+/* ── Drag & Drop ──────────────────────────────────────────── */
 function setupDragDrop() {
   const dropZone = $('#env-drop-zone');
   if (!dropZone) return;
-
   let dropCounter = 0;
-
-  function showDrop() {
-    dropCounter++;
-    dropZone.classList.add('drag-over');
-  }
-
-  function hideDrop() {
-    dropCounter--;
-    if (dropCounter <= 0) {
-      dropCounter = 0;
-      dropZone.classList.remove('drag-over');
-    }
-  }
+  const showDrop = () => { dropCounter++; dropZone.classList.add('dragover'); };
+  const hideDrop = () => { dropCounter--; if (dropCounter <= 0) { dropCounter = 0; dropZone.classList.remove('dragover'); } };
 
   async function handleDrop(paths) {
-    dropZone.classList.remove('drag-over');
+    dropZone.classList.remove('dragover');
     dropCounter = 0;
-    if (!paths || paths.length === 0) return;
+    if (!paths?.length) return;
     const file = paths[0];
     const name = file.replace(/^.*[/\\]/, '');
     if (!name.startsWith('.env')) {
-      addActivity('Drop only .env files: ' + name, 'error');
+      showToast('Only .env files accepted', 'error');
       return;
     }
     try {
       const cfg = await invoke('load_custom_env', { path: file });
       applyConfig(cfg);
-      addActivity('Dropped: ' + name, 'info');
+      showToast('Loaded: ' + name, 'success');
     } catch (e) {
-      addActivity('Load failed: ' + e, 'error');
+      showToast('Load failed: ' + e, 'error');
     }
   }
 
-  // Listen for Tauri drag-drop events (gives real file paths)
   try {
     const { listen } = window.__TAURI__.event;
     listen('tauri://drag-drop', (event) => {
@@ -472,9 +543,8 @@ function setupDragDrop() {
   } catch (_) {}
 }
 
-async function pickEnvAndLoad() {
-  showFileBrowser();
-}
+/* ── File Browser ─────────────────────────────────────────── */
+async function pickEnvAndLoad() { showFileBrowser(); }
 
 function showFileBrowser() {
   let overlay = $('#file-browser');
@@ -482,28 +552,30 @@ function showFileBrowser() {
     overlay = document.createElement('div');
     overlay.id = 'file-browser';
     overlay.className = 'modal-overlay';
-    overlay.style.display = 'none';
     document.body.appendChild(overlay);
   }
   overlay.innerHTML = `
-    <div class="modal">
+    <div class="modal glass">
       <div class="modal-header">
         <span class="modal-title">Browse .env file</span>
-        <button class="btn btn-ghost btn-sm modal-close">×</button>
+        <button class="btn btn-ghost btn-icon modal-close">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
       </div>
       <div class="modal-body">
-        <div id="browser-toolbar" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <button id="browser-up" class="btn btn-sm" title="Parent directory">↑</button>
-          <span id="browser-path" style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <div class="browser-toolbar">
+          <button id="browser-up" class="btn btn-sm btn-icon" title="Parent directory">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 4l-6 6h4v6h4v-6h4l-6-6z" fill="currentColor"/></svg>
+          </button>
+          <span id="browser-path" class="mono"></span>
         </div>
-        <div id="browser-list" style="max-height:320px;overflow-y:auto"></div>
+        <div id="browser-list" class="browser-list"></div>
       </div>
-      <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:10px;color:var(--text-muted)">Hidden files are shown (including .env)</span>
-        <button id="browser-cancel" class="btn btn-sm">Cancel</button>
+      <div class="modal-footer">
+        <span class="browser-hint">Hidden files are shown (including .env)</span>
+        <button id="browser-cancel" class="btn btn-sm btn-outline">Cancel</button>
       </div>
-    </div>
-  `;
+    </div>`;
 
   overlay.style.display = 'flex';
 
@@ -511,25 +583,17 @@ function showFileBrowser() {
     ? state.config.source_files[0].replace(/\/[^/]*$/, '')
     : null;
   if (!currentDir) {
-    // Use project dir — get from list_env_files
     invoke('list_env_files').then(files => {
-      if (files && files.length > 0) {
-        currentDir = files[0].replace(/\/[^/]*$/, '');
-      } else {
-        currentDir = '/Users/wica/lq/zalo-tg';
-      }
+      currentDir = files?.length ? files[0].replace(/\/[^/]*$/, '') : '/Users/wica/lq/zalo-tg';
       loadBrowserDir(currentDir);
-    }).catch(() => {
-      currentDir = '/Users/wica/lq/zalo-tg';
-      loadBrowserDir(currentDir);
-    });
+    }).catch(() => loadBrowserDir('/Users/wica/lq/zalo-tg'));
   } else {
     loadBrowserDir(currentDir);
   }
 
-  overlay.querySelector('.modal-close')?.addEventListener('click', () => { overlay.style.display = 'none'; });
-  overlay.querySelector('#browser-cancel')?.addEventListener('click', () => { overlay.style.display = 'none'; });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
+  overlay.querySelector('.modal-close')?.addEventListener('click', () => overlay.style.display = 'none');
+  overlay.querySelector('#browser-cancel')?.addEventListener('click', () => overlay.style.display = 'none');
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
 }
 
 async function loadBrowserDir(dir) {
@@ -537,95 +601,66 @@ async function loadBrowserDir(dir) {
   const pathEl = $('#browser-path');
   const upBtn = $('#browser-up');
   if (!list || !pathEl) return;
-
   pathEl.textContent = dir;
 
-  // Up button
-  if (upBtn) {
-    const parent = dir.replace(/\/+$/, '').replace(/\/[^/]+$/, '') || '/';
-    upBtn.onclick = () => loadBrowserDir(parent);
-    upBtn.style.display = parent === '/' || parent === dir ? 'none' : '';
-  }
+  const parent = dir.replace(/\/+$/, '').replace(/\/[^/]+$/, '') || '/';
+  upBtn.onclick = () => loadBrowserDir(parent);
+  upBtn.style.display = parent === '/' || parent === dir ? 'none' : '';
+  upBtn.disabled = parent === '/' || parent === dir;
 
   try {
     const entries = await invoke('scan_dir', { dir });
     list.innerHTML = '';
-
-    // .env files first, then dirs, then other files
     const envFiles = entries.filter(e => !e.is_dir && e.name.startsWith('.env'));
     const dirs = entries.filter(e => e.is_dir);
     const others = entries.filter(e => !e.is_dir && !e.name.startsWith('.env'));
+    const all = [...envFiles, ...dirs, ...others];
 
-    const allItems = [...envFiles, ...dirs, ...others];
-    if (allItems.length === 0) {
-      list.innerHTML = '<div class="empty-state">Empty directory</div>';
+    if (all.length === 0) {
+      list.innerHTML = makeEmptyState('Empty directory');
       return;
     }
 
-    for (const entry of allItems) {
+    for (const entry of all) {
       const item = document.createElement('div');
       item.className = 'browser-item';
       if (entry.is_dir) {
-        item.innerHTML = `
-          <span style="color:var(--accent-violet);margin-right:6px">📁</span>
-          <span style="color:var(--text-primary)">${esc(entry.name)}/</span>
-        `;
+        item.innerHTML = `<span class="bi-icon">📁</span><span>${esc(entry.name)}/</span>`;
         item.addEventListener('click', () => loadBrowserDir(entry.path));
-        item.style.cursor = 'pointer';
       } else if (entry.name.startsWith('.env')) {
-        item.innerHTML = `
-          <span style="color:var(--accent);margin-right:6px">📄</span>
-          <span style="color:var(--accent);font-weight:500">${esc(entry.name)}</span>
-          <span style="margin-left:auto;font-size:10px;color:var(--accent)">Click to load</span>
-        `;
+        item.innerHTML = `<span class="bi-icon bi-env">📄</span><span class="bi-name-env">${esc(entry.name)}</span><span class="bi-action">Click to load</span>`;
         item.addEventListener('click', async () => {
           try {
             const cfg = await invoke('load_custom_env', { path: entry.path });
             applyConfig(cfg);
-            addActivity('Loaded: ' + entry.name, 'info');
+            showToast('Loaded: ' + entry.name, 'success');
             $('#file-browser').style.display = 'none';
-          } catch (e) {
-            addActivity('Load failed: ' + e, 'error');
-          }
+          } catch (e) { showToast('Load failed: ' + e, 'error'); }
         });
-        item.style.cursor = 'pointer';
       } else {
-        item.innerHTML = `
-          <span style="color:var(--text-muted);margin-right:6px">📄</span>
-          <span style="color:var(--text-muted)">${esc(entry.name)}</span>
-        `;
+        item.innerHTML = `<span class="bi-icon" style="opacity:0.4">📄</span><span style="color:var(--text-dim)">${esc(entry.name)}</span>`;
         item.style.opacity = '0.5';
       }
       list.appendChild(item);
     }
   } catch (e) {
-    list.innerHTML = '<div class="empty-state" style="color:var(--red)">Error: ' + esc(String(e)) + '</div>';
+    list.innerHTML = `<div class="empty-state" style="color:var(--rose)">Error: ${esc(String(e))}</div>`;
   }
 }
 
+/* ── Config ───────────────────────────────────────────────── */
 async function loadConfig() {
-  try {
-    const cfg = await invoke('get_config');
-    applyConfig(cfg);
-  } catch (_) {}
+  try { applyConfig(await invoke('get_config')); } catch (_) {}
 }
 
 function applyConfig(cfg) {
   state.config = cfg;
   const vars = cfg.vars || {};
-
-  $('#config-path').value = cfg.source_files?.length
-    ? cfg.source_files.join(', ')
-    : 'No file loaded';
-
+  $('#config-path').value = cfg.source_files?.length ? cfg.source_files.join(', ') : 'No file loaded';
   const src = $('#config-source');
-  if (cfg.source_files?.length) {
-    const files = cfg.source_files.map(f => f.replace(/^.*[/\\]/, '')).join(' + ');
-    src.textContent = 'Loaded from: ' + files;
-  } else {
-    src.textContent = 'No config file found — add variables below and save';
-  }
-
+  src.textContent = cfg.source_files?.length
+    ? 'Loaded from: ' + cfg.source_files.map(f => f.replace(/^.*[/\\]/, '')).join(' + ')
+    : 'No config file found — add variables below and save';
   renderEnvList(vars);
   listEnvFiles();
 }
@@ -635,35 +670,27 @@ async function listEnvFiles() {
     const files = await invoke('list_env_files');
     const container = $('#env-files-list');
     if (!container) return;
-    if (!files || files.length === 0) {
-      container.innerHTML = '<div style="color:var(--text-muted);padding:4px 0">No .env files found in project directory</div>';
+    if (!files?.length) {
+      container.innerHTML = '<div style="color:var(--text-muted);padding:4px 0;font-size:11px">No .env files found</div>';
       return;
     }
     const current = state.config?.source_files || [];
     const currentNames = current.map(f => f.replace(/^.*[/\\]/, ''));
-    let html = '<div style="display:flex;flex-direction:column;gap:2px">';
-    for (const f of files) {
+    container.innerHTML = '<div style="display:flex;flex-direction:column;gap:2px">' + files.map(f => {
       const name = f.replace(/^.*[/\\]/, '');
       const active = currentNames.includes(name);
-      html += `<button class="env-file-btn ${active ? 'active' : ''}" data-path="${esc(f)}" style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;border:none;background:${active ? 'var(--accent-dim)' : 'transparent'};color:${active ? 'var(--accent)' : 'var(--text-secondary)'};cursor:pointer;font-size:12px;font-family:var(--font-mono);text-align:left;width:100%">
-        <span>📄</span>
-        <span style="flex:1">${esc(name)}</span>
-        ${active ? '<span style="font-size:10px;color:var(--accent)">active</span>' : '<span style="font-size:10px;color:var(--text-muted)">click to load</span>'}
+      return `<button class="env-file-btn ${active ? 'active' : ''}" data-path="${esc(f)}">
+        <span>📄</span><span style="flex:1">${esc(name)}</span>
+        <span style="font-size:10px;color:${active ? 'var(--teal)' : 'var(--text-muted)'}">${active ? 'active' : 'load'}</span>
       </button>`;
-    }
-    html += '</div>';
-    container.innerHTML = html;
+    }).join('') + '</div>';
 
     container.querySelectorAll('.env-file-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const path = btn.dataset.path;
         try {
-          const cfg = await invoke('load_custom_env', { path });
-          applyConfig(cfg);
-          addActivity('Loaded: ' + path.replace(/^.*[/\\]/, ''), 'info');
-        } catch (e) {
-          addActivity('Load failed: ' + e, 'error');
-        }
+          applyConfig(await invoke('load_custom_env', { path: btn.dataset.path }));
+          showToast('Loaded: ' + btn.dataset.path.replace(/^.*[/\\]/, ''), 'success');
+        } catch (e) { showToast('Load failed: ' + e, 'error'); }
       });
     });
   } catch (_) {}
@@ -674,21 +701,16 @@ function renderEnvList(vars) {
   if (!list) return;
   const keys = Object.keys(vars).sort();
   if (keys.length === 0) {
-    list.innerHTML = '<div class="empty-state" style="padding:12px 0">No variables yet. Click "+ Add" to add one.</div>';
+    list.innerHTML = '<div class="empty-state" style="padding:16px 0">No variables yet. Click "+ Add" to create one.</div>';
     return;
   }
   list.innerHTML = keys.map(k => envRowHTML(k, vars[k])).join('');
-
-  // Wire up remove buttons
-  list.querySelectorAll('.env-remove').forEach(btn => {
+  list.querySelectorAll('.env-del').forEach(btn => {
     btn.addEventListener('click', () => {
-      const key = btn.dataset.key;
-      delete state.config.vars[key];
+      delete state.config.vars[btn.dataset.key];
       renderEnvList(state.config.vars);
     });
   });
-
-  // Wire up input changes
   list.querySelectorAll('.env-key').forEach(inp => {
     inp.addEventListener('change', () => {
       const oldKey = inp.dataset.origKey;
@@ -700,22 +722,22 @@ function renderEnvList(vars) {
       }
     });
   });
-  list.querySelectorAll('.env-val').forEach(inp => {
+  list.querySelectorAll('.env-value').forEach(inp => {
     inp.addEventListener('change', () => {
-      const key = inp.dataset.key;
-      state.config.vars[key] = inp.value;
+      state.config.vars[inp.dataset.key] = inp.value;
     });
   });
 }
 
 function envRowHTML(key, val) {
   const masked = /token|secret|password|key|auth/i.test(key);
-  const displayVal = masked && val ? '••••••••' : val || '';
-  return `<div class="env-row" style="display:flex;align-items:center;gap:8px;padding:4px 0">
-    <input type="text" class="input mono env-key" style="width:200px;flex-shrink:0" value="${esc(key)}" data-orig-key="${esc(key)}" placeholder="KEY" />
-    <span style="color:var(--text-muted)">=</span>
-    <input type="${masked ? 'password' : 'text'}" class="input mono env-val" style="flex:1;min-width:0" value="${esc(displayVal)}" data-key="${esc(key)}" placeholder="value" />
-    <button class="btn btn-ghost btn-sm env-remove" data-key="${esc(key)}" title="Remove" style="color:var(--red)">×</button>
+  return `<div class="env-row">
+    <input type="text" class="env-key" value="${esc(key)}" data-orig-key="${esc(key)}" placeholder="KEY" />
+    <span style="color:var(--text-dim)">=</span>
+    <input type="${masked ? 'password' : 'text'}" class="env-value" value="${esc(val || '')}" data-key="${esc(key)}" placeholder="value" />
+    <button class="env-del" data-key="${esc(key)}" title="Remove">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
   </div>`;
 }
 
@@ -725,30 +747,59 @@ function addEnvRow() {
   const key = 'NEW_KEY_' + Date.now();
   state.config.vars[key] = '';
   renderEnvList(state.config.vars);
-  // Focus the new key input
-  const list = $('#env-list');
-  const lastInput = list?.querySelector('.env-key:last-of-type');
+  const lastInput = $('#env-list .env-key:last-of-type');
   if (lastInput) setTimeout(() => lastInput.focus(), 50);
 }
 
 async function resetToDefaultEnv() {
   try {
-    const cfg = await invoke('get_config');
-    applyConfig(cfg);
-    addActivity('Reset to default config', 'info');
-  } catch (e) {
-    addActivity('Reset failed: ' + e, 'error');
-  }
+    applyConfig(await invoke('get_config'));
+    showToast('Reset to default config', 'info');
+  } catch (e) { showToast('Reset failed: ' + e, 'error'); }
 }
 
 async function saveSettings() {
   if (!state.config?.vars) return;
+  const btn = $('#btn-save-settings');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="btn-spinner"></span><span>Saving…</span>';
   try {
     await invoke('save_config', { vars: state.config.vars });
-    addActivity('Settings saved', 'info');
+    showToast('Settings saved', 'success');
   } catch (e) {
-    addActivity('Save failed: ' + e, 'error');
+    showToast('Save failed: ' + e, 'error');
   }
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Save</span>';
+}
+
+/* ── Toast ────────────────────────────────────────────────── */
+function showToast(msg, type = 'info') {
+  const container = $('#toast-container');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  const icons = {
+    success: '<svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M6 10l3 3 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    error: '<svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M7 7l6 6M13 7l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    info: '<svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v.01M10 9v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+  };
+  toast.innerHTML = (icons[type] || icons.info) + '<span>' + esc(msg) + '</span>';
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('out');
+    setTimeout(() => toast.remove(), 300);
+  }, 3500);
+}
+
+/* ── Helpers ──────────────────────────────────────────────── */
+function makeEmptyState(text) {
+  return `<div class="empty-state">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3" stroke-linecap="round"/>
+    </svg>
+    <span>${esc(text)}</span>
+  </div>`;
 }
 
 function fmtUptime(s) {
@@ -760,14 +811,13 @@ function fmtUptime(s) {
 
 function esc(str) {
   const d = document.createElement('div');
-  d.textContent = str;
+  d.textContent = String(str ?? '');
   return d.innerHTML;
 }
 
-function trunc(str, n) {
-  return str.length > n ? str.slice(0, n) + '…' : str;
-}
+function trunc(str, n) { return str.length > n ? str.slice(0, n) + '…' : str; }
 
+/* ── Resize ───────────────────────────────────────────────── */
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
