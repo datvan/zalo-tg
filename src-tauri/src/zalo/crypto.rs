@@ -52,16 +52,21 @@ pub fn aes_cbc_decrypt(secret_key_b64: &str, ciphertext_b64: &str) -> Result<Str
     String::from_utf8(pt.to_vec()).map_err(|e| format!("utf8 decode: {e}"))
 }
 
-/// Login-specific ParamsEncryptor AES: key is UTF-8 bytes of hex string (truncated to 16), null IV.
+/// AES-128-CBC encrypt with a UTF-8 string key (truncated to 16 bytes), null IV, PKCS7.
 /// Output: hex-encoded, uppercase.
-pub fn login_encrypt_hex(plaintext: &str) -> Result<String, String> {
-    let key_bytes = &LOGIN_AES_KEY.as_bytes()[..16];
+pub fn aes_cbc_encrypt_utf8_key_hex(key_utf8: &str, plaintext: &str) -> Result<String, String> {
+    let key_bytes = &key_utf8.as_bytes()[..16.min(key_utf8.len())];
     let mut buf = plaintext.as_bytes().to_vec();
     buf.resize(buf.len() + 16, 0u8);
     let ct = Aes128CbcEnc::new(key_bytes.into(), &ZERO_IV.into())
         .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
-        .map_err(|e| format!("login encrypt: {e}"))?;
+        .map_err(|e| format!("encrypt: {e}"))?;
     Ok(hex::encode_upper(ct))
+}
+
+/// Login-specific ParamsEncryptor: uses hardcoded key, hex uppercase output.
+pub fn login_encrypt_hex(plaintext: &str) -> Result<String, String> {
+    aes_cbc_encrypt_utf8_key_hex(LOGIN_AES_KEY, plaintext)
 }
 
 /// Login response decrypt: key is UTF-8 bytes (truncated to 16), null IV.
