@@ -18,6 +18,10 @@ pub struct BridgeStatus {
     pub log_count: usize,
 }
 
+fn shlex(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 pub struct BridgeProcess {
     child: Mutex<Option<Child>>,
     logs: Arc<Mutex<Vec<LogEntry>>>,
@@ -47,9 +51,11 @@ impl BridgeProcess {
             }
         }
 
-        let mut child = Command::new("npm")
-            .args(["exec", "tsx", "src/index.ts"])
-            .current_dir(project_dir)
+        let mut child = Command::new("bash")
+            .args(["-l", "-c", &format!(
+                "cd {} && node --import tsx/esm src/index.ts",
+                shlex(&project_dir)
+            )])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())

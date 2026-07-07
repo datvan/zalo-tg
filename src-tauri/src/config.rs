@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-pub const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+pub const PROJECT_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppConfig {
