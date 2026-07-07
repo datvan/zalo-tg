@@ -1,10 +1,10 @@
 use crate::config::BridgeConfig;
 use crate::store::Database;
 use crate::telegram::client::TelegramClient;
+use crate::zalo::client::{ZaloClient, ZaloEvent, ZaloState};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
 type LogBuf = Arc<Mutex<Vec<LogEntry>>>;
@@ -35,35 +35,26 @@ pub struct BridgeStatus {
     pub msg_count: usize,
 }
 
-#[derive(serde::Deserialize)]
-struct SidecarEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    state: Option<String>,
-}
-
 pub struct BridgeOrchestrator {
-    child: Mutex<Option<Child>>,
+    zc: Arc<ZaloClient>,
     state: Mutex<BridgeState>,
     logs: LogBuf,
     started_at: Mutex<Option<Instant>>,
     db: Arc<Database>,
     tg_client: Arc<Mutex<Option<TelegramClient>>>,
     tg_offset: Arc<Mutex<i64>>,
-    stdin_writer: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
 }
 
 impl BridgeOrchestrator {
-    pub fn new(db: Database) -> Self {
+    pub fn new(db: Database, project_dir: &str) -> Self {
         Self {
-            child: Mutex::new(None),
+            zc: Arc::new(ZaloClient::new(project_dir)),
             state: Mutex::new(BridgeState::Stopped),
             logs: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             started_at: Mutex::new(None),
             db: Arc::new(db),
             tg_client: Arc::new(Mutex::new(None)),
             tg_offset: Arc::new(Mutex::new(0)),
-            stdin_writer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -71,12 +62,10 @@ impl BridgeOrchestrator {
         &self.db
     }
 
-    pub async fn start(&self, project_dir: &str, config: BridgeConfig) -> Result<(), String> {
-        {
-            let child_lock = self.child.lock().await;
-            if child_lock.is_some() {
-                return Err("Bridge is already running".into());
-            }
+    pub async fn start(&self, config: BridgeConfig) -> Result<(), String> {
+        // Check if Zalo worker is already running
+        if let ZaloState::Connecting | ZaloState::Ready = self.zc.state().await {
+            return Err("Bridge is already running".into());
         }
 
         *self.state.lock().await = BridgeState::Starting;
@@ -87,47 +76,52 @@ impl BridgeOrchestrator {
         };
         *self.tg_client.lock().await = Some(tg);
 
-        let script = format!(
-            "cd {} && node --import tsx/esm src/sidecar.ts 2>&1",
-            shlex(project_dir)
-        );
+        // Start the Zalo worker
+        let zc = self.zc.clone();
+        zc.start().await.map_err(|e| {
+            *self.state.blocking_lock() = BridgeState::Error(e.to_string());
+            format!("start zalo-worker: {e}")
+        })?;
 
-        let mut child = Command::new("bash")
-            .args(["-l", "-c", &script])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                *self.state.blocking_lock() = BridgeState::Error(e.to_string());
-                format!("spawn sidecar: {e}")
-            })?;
+        let child_stdout = zc.take_stdout().await.ok_or("no stdout")?;
+        let child_stderr = zc.take_stderr().await.ok_or("no stderr")?;
 
-        let child_stdout = child.stdout.take().ok_or("no stdout")?;
-        let child_stdin = child.stdin.take().ok_or("no stdin")?;
-        let child_stderr = child.stderr.take().ok_or("no stderr")?;
-
-        *self.child.lock().await = Some(child);
         *self.started_at.lock().await = Some(Instant::now());
         *self.state.lock().await = BridgeState::Running;
-        *self.stdin_writer.lock().await = Some(child_stdin);
 
-        // ── Stdout reader (JSON events from sidecar) ──────────────────────
+        // ── Stdout reader (JSON events from zalo-worker) ─────────────────
         let l1 = self.logs.clone();
-        let db1 = self.db.clone();
+        let zc_state = self.zc.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(child_stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                log_line(&l1, format!("[SC] {line}")).await;
-                if let Ok(ev) = serde_json::from_str::<SidecarEvent>(&line) {
-                    if ev.event_type == "state" {
-                        if let Some(s) = &ev.state {
-                            log_line(&l1, format!("[SIDECAR] state: {s}")).await;
+                log_line(&l1, format!("[ZALO] {line}")).await;
+                if let Ok(ev) = serde_json::from_str::<ZaloEvent>(&line) {
+                    match ev.event_type.as_str() {
+                        "state" => {
+                            if let Some(s) = &ev.event {
+                                let new_state = match s.as_str() {
+                                    "ready" => ZaloState::Ready,
+                                    "need_login" => ZaloState::NeedLogin,
+                                    _ => ZaloState::Connecting,
+                                };
+                                zc_state.set_state(new_state).await;
+                                log_line(&l1, format!("[ZALO] state: {s}")).await;
+                            }
                         }
+                        "event" => {
+                            if let Some(ev_name) = &ev.event {
+                                log_line(&l1, format!("[ZALO] event: {ev_name}")).await;
+                            }
+                        }
+                        "started" => {
+                            log_line(&l1, "[ZALO] worker started".into()).await;
+                        }
+                        _ => {}
                     }
                 }
             }
-            log_line(&l1, "[SIDECAR] stdout closed".into()).await;
+            log_line(&l1, "[ZALO] stdout closed".into()).await;
         });
 
         // ── Stderr reader ────────────────────────────────────────────────
@@ -135,7 +129,7 @@ impl BridgeOrchestrator {
         tokio::spawn(async move {
             let mut lines = BufReader::new(child_stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                log_line(&l2, format!("[SC-ERR] {line}")).await;
+                log_line(&l2, format!("[ZALO-ERR] {line}")).await;
             }
         });
 
@@ -143,7 +137,7 @@ impl BridgeOrchestrator {
         let tgc = self.tg_client.clone();
         let tgo = self.tg_offset.clone();
         let l3 = self.logs.clone();
-        let sw = self.stdin_writer.clone();
+        let zc_tg = self.zc.clone();
         let _tg_group = config.tg_group_id;
         tokio::spawn(async move {
             loop {
@@ -162,7 +156,7 @@ impl BridgeOrchestrator {
                         let mut max_id = offset;
                         for u in updates {
                             max_id = max_id.max(u.update_id + 1);
-                            handle_tg_update(&l3, &sw, &u).await;
+                            handle_tg_update(&l3, &zc_tg, &u).await;
                         }
                         *tgo.lock().await = max_id;
                     }
@@ -173,7 +167,6 @@ impl BridgeOrchestrator {
                 }
                 drop(client_lock);
 
-                // Small delay between polling cycles
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         });
@@ -182,60 +175,22 @@ impl BridgeOrchestrator {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
-        let mut child_lock = self.child.lock().await;
-        let mut child = child_lock.take().ok_or("Bridge is not running")?;
-        *self.stdin_writer.lock().await = None;
-        drop(child_lock);
-
         *self.state.lock().await = BridgeState::Stopping;
         *self.started_at.lock().await = None;
 
-        let pid = child.id().ok_or("no pid")?;
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+        self.zc.stop().await.map_err(|e| format!("stop zalo-worker: {e}"))?;
 
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    *self.state.lock().await = BridgeState::Stopped;
-                    return Ok(());
-                }
-                Ok(None) => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        let _ = std::process::Command::new("kill")
-                            .arg("-KILL")
-                            .arg(pid.to_string())
-                            .status();
-                        let _ = child.wait().await;
-                        *self.state.lock().await = BridgeState::Stopped;
-                        return Ok(());
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(_) => {
-                    *self.state.lock().await = BridgeState::Stopped;
-                    return Ok(());
-                }
-            }
-        }
+        *self.state.lock().await = BridgeState::Stopped;
+        Ok(())
     }
 
     pub async fn status(&self) -> BridgeStatus {
-        let mut child_guard = self.child.lock().await;
-        let running = match child_guard.as_mut() {
-            Some(c) => c.try_wait().ok().flatten().is_none(),
-            None => false,
-        };
-        let pid = child_guard.as_ref().filter(|_| running).and_then(|c| c.id());
-        drop(child_guard);
+        let zstate = self.zc.state().await;
+        let running = matches!(zstate, ZaloState::Ready | ZaloState::Connecting);
+        let pid = self.zc.child_id().await;
 
-        // Only auto-transition Running→Stopped when child exits
         if !running && *self.state.lock().await == BridgeState::Running {
             *self.state.lock().await = BridgeState::Stopped;
-            *self.child.lock().await = None;
         }
 
         let uptime = self.started_at.lock().await.map(|t| t.elapsed().as_secs());
@@ -249,18 +204,14 @@ impl BridgeOrchestrator {
         }
     }
 
+    pub fn zalo_client(&self) -> Arc<ZaloClient> {
+        self.zc.clone()
+    }
+
     pub async fn send_stdin(&self, cmd: &str) -> Result<(), String> {
-        let mut w = self.stdin_writer.lock().await;
-        let writer = w.as_mut().ok_or("stdin not available")?;
-        writer
-            .write_all(cmd.as_bytes())
-            .await
-            .map_err(|e| format!("stdin write: {e}"))?;
-        writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| format!("stdin write: {e}"))?;
-        Ok(())
+        let val: serde_json::Value =
+            serde_json::from_str(cmd).map_err(|e| format!("parse cmd: {e}"))?;
+        self.zc.send_raw(&val).await
     }
 
     pub async fn get_logs(&self, limit: usize) -> Vec<LogEntry> {
@@ -278,7 +229,7 @@ impl BridgeOrchestrator {
 
 async fn handle_tg_update(
     logs: &LogBuf,
-    stdin_w: &Mutex<Option<tokio::process::ChildStdin>>,
+    zc: &ZaloClient,
     update: &crate::telegram::client::TgUpdate,
 ) {
     if let Some(ref msg) = update.message {
@@ -290,8 +241,9 @@ async fn handle_tg_update(
             let cmd_name = text.split(' ').next().unwrap_or(text);
             match cmd_name {
                 "/login" | "/start" => {
-                    let cmd = serde_json::json!({"cmd": "trigger_login"});
-                    send_stdin_cmd(stdin_w, &cmd).await;
+                    if let Err(e) = zc.trigger_login().await {
+                        log_line(logs, format!("[ZALO] login error: {e}")).await;
+                    }
                 }
                 "/status" => {
                     log_line(logs, "[TG] Status requested".into()).await;
@@ -301,16 +253,8 @@ async fn handle_tg_update(
                 }
             }
         } else if !text.is_empty() {
-            if let Some(ref from) = msg.from {
-                let cmd = serde_json::json!({
-                    "cmd": "send_message",
-                    "data": {
-                        "threadId": msg.chat.id.to_string(),
-                        "text": text,
-                        "fromId": from.id.to_string(),
-                    }
-                });
-                send_stdin_cmd(stdin_w, &cmd).await;
+            if let Err(e) = zc.send_message(&msg.chat.id.to_string(), text).await {
+                log_line(logs, format!("[ZALO] send error: {e}")).await;
             }
         }
     }
@@ -319,18 +263,6 @@ async fn handle_tg_update(
         if let Some(ref data) = cq.data {
             log_line(logs, format!("[TG] callback: {data}")).await;
         }
-    }
-}
-
-async fn send_stdin_cmd(
-    stdin_w: &Mutex<Option<tokio::process::ChildStdin>>,
-    cmd: &serde_json::Value,
-) {
-    let mut w = stdin_w.lock().await;
-    if let Some(ref mut writer) = *w {
-        let line = serde_json::to_string(cmd).unwrap_or_default();
-        let _ = writer.write_all(line.as_bytes()).await;
-        let _ = writer.write_all(b"\n").await;
     }
 }
 
@@ -370,10 +302,6 @@ fn infer_level(line: &str) -> String {
     }
 }
 
-fn shlex(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -384,7 +312,7 @@ mod tests {
 
     fn make_bridge() -> BridgeOrchestrator {
         let db = crate::store::Database::open_in_memory().unwrap();
-        BridgeOrchestrator::new(db)
+        BridgeOrchestrator::new(db, ".")
     }
 
     fn test_config() -> BridgeConfig {
@@ -410,23 +338,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_stop_echo_process() {
+    async fn test_start_stop() {
         let b = make_bridge();
-        let script = "echo '{\"type\":\"state\",\"state\":\"ready\"}' && sleep 10";
-        // Start with a script that echoes JSON then sleeps
         let cfg = test_config();
-        let dir = std::env::current_dir().unwrap();
-
-        // We override the command by setting the cfg's data dir
-        // Use a simple bash -c with the echo
-        // Actually, we need to start the bridge with our custom script
-        // Instead, let's check that start() spawns a process correctly
-
-        // For a real echo test, we can check that start() returns Ok
-        // and status() shows Running
-        let result = b.start(dir.to_str().unwrap(), cfg).await;
-        // This will try to spawn node src/sidecar.ts which may not exist in test env
-        // In CI, it would fail — so let's just test the state machine
+        let result = b.start(cfg).await;
         if result.is_ok() {
             let s = b.status().await;
             assert!(s.state == BridgeState::Running || s.state == BridgeState::Stopped);
@@ -434,7 +349,6 @@ mod tests {
             let s = b.status().await;
             assert_eq!(s.state, BridgeState::Stopped);
         } else {
-            // If spawn fails, state should be Error
             let s = b.status().await;
             assert!(matches!(s.state, BridgeState::Error(_)));
         }
@@ -444,10 +358,9 @@ mod tests {
     async fn test_double_start_fails() {
         let b = make_bridge();
         let cfg = test_config();
-        let dir = std::env::current_dir().unwrap();
-        let first = b.start(dir.to_str().unwrap(), cfg).await;
+        let first = b.start(cfg).await;
         if first.is_ok() {
-            let second = b.start(dir.to_str().unwrap(), test_config()).await;
+            let second = b.start(test_config()).await;
             assert!(second.is_err());
             assert!(second.unwrap_err().contains("already running"));
             let _ = b.stop().await;
@@ -457,16 +370,14 @@ mod tests {
     #[tokio::test]
     async fn test_stop_when_not_running() {
         let b = make_bridge();
-        let err = b.stop().await.unwrap_err();
-        assert!(err.contains("not running"));
+        // With ZaloClient, stop succeeds even when not running
+        assert!(b.stop().await.is_ok());
     }
 
     #[tokio::test]
     async fn test_log_count_updates() {
         let b = make_bridge();
         assert_eq!(b.status().await.log_count, 0);
-        // push_log is private but logs are accumulated by the process reader
-        // We just verify initial state is clean
         assert!(b.get_logs(10).await.is_empty());
     }
 
@@ -478,33 +389,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shlex() {
-        assert_eq!(shlex("hello"), "'hello'");
-        assert_eq!(shlex("it's"), "'it'\\''s'");
-        assert_eq!(shlex("/path/to/dir"), "'/path/to/dir'");
-    }
-
-    #[tokio::test]
     async fn test_state_transitions() {
         let b = make_bridge();
         assert_eq!(b.status().await.state, BridgeState::Stopped);
 
-        // Manual state changes persist for non-Running states
         *b.state.lock().await = BridgeState::Starting;
         assert_eq!(b.status().await.state, BridgeState::Starting);
 
         *b.state.lock().await = BridgeState::Stopping;
         assert_eq!(b.status().await.state, BridgeState::Stopping);
 
-        // Running without a child auto-transitions to Stopped
+        // Running without worker auto-transitions to Stopped
         *b.state.lock().await = BridgeState::Running;
         b.status().await;
         assert_eq!(*b.state.lock().await, BridgeState::Stopped);
 
-        // Stray Starting/Stopping states on a stopped bridge persist
         *b.state.lock().await = BridgeState::Starting;
         assert_eq!(b.status().await.state, BridgeState::Starting);
-        // Error state also persists
         *b.state.lock().await = BridgeState::Error("test".into());
         assert_eq!(b.status().await.state, BridgeState::Error("test".into()));
     }
@@ -517,65 +418,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stdin_write_to_process() {
-        // Spawn a process that echoes stdin to stdout as JSON
-        let mut child = Command::new("bash")
-            .args(["-c", "while IFS= read -r line; do echo \"{\\\"echo\\\":\\\"$line\\\"}\"; done"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn echo process");
-
-        let mut stdin = child.stdin.take().expect("stdin");
-        let mut stdout = child.stdout.take().expect("stdout");
-
-        // Send a command
-        stdin.write_all(b"hello\n").await.unwrap();
-        stdin.write_all(b"world\n").await.unwrap();
-        // Close stdin so the loop exits
-        drop(stdin);
-
-        // Read output
-        let mut output = String::new();
-        use tokio::io::AsyncReadExt;
-        stdout.read_to_string(&mut output).await.unwrap();
-
-        assert!(output.contains(r#""echo":"hello""#));
-        assert!(output.contains(r#""echo":"world""#));
-
-        let _ = child.wait().await;
+    async fn test_send_stdin() {
+        let b = make_bridge();
+        // Without starting the bridge, send_stdin should fail
+        let err = b.send_stdin(r#"{"cmd":"ping"}"#).await.unwrap_err();
+        assert!(err.contains("not started") || err.contains("parse"));
     }
 
     #[tokio::test]
-    async fn test_json_event_roundtrip() {
-        // Simulate a process that outputs JSON events like the sidecar
-        let mut child = Command::new("bash")
-            .args(["-c", r#"echo '{"type":"state","state":"ready"}'; sleep 1; echo '{"type":"log","level":"info","message":"test"}'"#])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn");
-
-        let stdout = child.stdout.take().expect("stdout");
-        let mut lines = BufReader::new(stdout).lines();
-        let mut events = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            events.push(line);
-            if events.len() >= 2 {
-                break;
-            }
-        }
-
-        assert_eq!(events.len(), 2);
-        let first: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
-        assert_eq!(first["type"], "state");
-        assert_eq!(first["state"], "ready");
-
-        let second: serde_json::Value = serde_json::from_str(&events[1]).unwrap();
-        assert_eq!(second["type"], "log");
-
-        let _ = child.wait().await;
+    async fn test_zalo_client_accessible() {
+        let b = make_bridge();
+        let zc = b.zalo_client();
+        assert_eq!(zc.state().await, ZaloState::Disconnected);
     }
 }
