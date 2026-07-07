@@ -33,11 +33,10 @@ fn db_path(project_dir: &PathBuf) -> PathBuf {
 #[tauri::command]
 async fn start_bridge(state: tauri::State<'_, Mutex<AppState>>) -> Result<(), String> {
     let state = state.lock().await;
-    let dir = state.project_dir.to_str().unwrap_or(".");
     let (base, local) = base_paths(&state.project_dir);
     let (vars, _) = config::load_merged_env(&base, &local);
     let bridge_config = config::BridgeConfig::from_vars(&vars);
-    state.bridge.start(dir, bridge_config).await
+    state.bridge.start(bridge_config).await
 }
 
 #[tauri::command]
@@ -205,7 +204,7 @@ fn main() {
 
     let db = Database::open(&db_path(&project_dir)).expect("Failed to open database");
 
-    let bridge = BridgeOrchestrator::new(db);
+    let bridge = BridgeOrchestrator::new(db, project_dir.to_str().unwrap_or("."));
 
     tauri::Builder::default()
         .manage(Mutex::new(AppState {
@@ -241,11 +240,10 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             let state = handle.state::<Mutex<AppState>>();
                             let s = state.lock().await;
-                            let dir = s.project_dir.to_str().unwrap_or(".");
                             let (base, local) = base_paths(&s.project_dir);
                             let (vars, _) = config::load_merged_env(&base, &local);
                             let bridge_config = config::BridgeConfig::from_vars(&vars);
-                            let _ = s.bridge.start(dir, bridge_config).await;
+                            let _ = s.bridge.start(bridge_config).await;
                         });
                     }
                     "stop" => {
