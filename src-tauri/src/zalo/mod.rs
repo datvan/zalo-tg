@@ -5,4 +5,3 @@ pub mod types;
 pub mod ws;
 
 pub use client::ZaloClient;
-pub use types::*;
