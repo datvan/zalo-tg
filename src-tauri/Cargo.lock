@@ -5282,6 +5282,7 @@ dependencies = [
  "cbc",
  "chrono",
  "flate2",
+ "futures-util",
  "hex",
  "md-5",
  "reqwest 0.12.28",
