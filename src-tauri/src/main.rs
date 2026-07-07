@@ -33,7 +33,10 @@ fn db_path(project_dir: &PathBuf) -> PathBuf {
 async fn start_bridge(state: tauri::State<'_, Mutex<AppState>>) -> Result<(), String> {
     let state = state.lock().await;
     let dir = state.project_dir.to_str().unwrap_or(".");
-    state.bridge.start(dir).await
+    let (base, local) = base_paths(&state.project_dir);
+    let (vars, _) = config::load_merged_env(&base, &local);
+    let bridge_config = config::BridgeConfig::from_vars(&vars);
+    state.bridge.start(dir, bridge_config).await
 }
 
 #[tauri::command]
@@ -47,7 +50,7 @@ async fn get_bridge_status(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<bridge::BridgeStatus, ()> {
     let state = state.lock().await;
-    Ok(state.bridge.status())
+    Ok(state.bridge.status().await)
 }
 
 #[tauri::command]
@@ -238,7 +241,10 @@ fn main() {
                             let state = handle.state::<Mutex<AppState>>();
                             let s = state.lock().await;
                             let dir = s.project_dir.to_str().unwrap_or(".");
-                            let _ = s.bridge.start(dir).await;
+                            let (base, local) = base_paths(&s.project_dir);
+                            let (vars, _) = config::load_merged_env(&base, &local);
+                            let bridge_config = config::BridgeConfig::from_vars(&vars);
+                            let _ = s.bridge.start(dir, bridge_config).await;
                         });
                     }
                     "stop" => {

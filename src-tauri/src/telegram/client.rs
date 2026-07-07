@@ -299,11 +299,57 @@ pub struct SendMessageParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TgUpdate {
+    #[serde(default)]
+    pub update_id: i64,
+    pub message: Option<Box<TgMessage>>,
+    pub edited_message: Option<Box<TgMessage>>,
+    pub callback_query: Option<TgCallbackQuery>,
+    pub message_reaction: Option<TgMessageReaction>,
+    pub poll_answer: Option<TgPollAnswer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TgCallbackQuery {
+    pub id: String,
+    pub from: TgUser,
+    pub message: Option<Box<TgMessage>>,
+    pub data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TgMessageReaction {
+    pub chat: TgChat,
+    pub message_id: i64,
+    pub date: i64,
+    pub actor_chat: Option<TgChat>,
+    pub old_reaction: Vec<TgReactionType>,
+    pub new_reaction: Vec<TgReactionType>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TgReactionType {
+    #[serde(rename = "type")]
+    pub reaction_type: String,
+    pub emoji: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TgPollAnswer {
+    pub poll_id: String,
+    pub user: TgUser,
+    pub option_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TgMessage {
     pub message_id: i64,
     pub chat: TgChat,
     pub text: Option<String>,
     pub date: i64,
+    pub from: Option<TgUser>,
+    pub reply_to_message: Option<Box<TgMessage>>,
+    pub message_thread_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,5 +558,38 @@ impl TelegramClient {
             action: String,
         }
         self.call("sendChatAction", &P { chat_id: chat_id as i64, action: action.into() }).await
+    }
+
+    pub async fn get_updates(&self, offset: Option<i64>, timeout: Option<i64>) -> Result<Vec<TgUpdate>, String> {
+        #[derive(Serialize)]
+        struct P {
+            offset: Option<i64>,
+            limit: i64,
+            timeout: Option<i64>,
+            allowed_updates: Vec<String>,
+        }
+        self.call("getUpdates", &P {
+            offset,
+            limit: 100,
+            timeout,
+            allowed_updates: vec![
+                "message".into(),
+                "callback_query".into(),
+                "message_reaction".into(),
+                "poll_answer".into(),
+            ],
+        }).await
+    }
+
+    pub async fn answer_callback_query(&self, query_id: &str, text: Option<&str>) -> Result<bool, String> {
+        #[derive(Serialize)]
+        struct P {
+            callback_query_id: String,
+            text: Option<String>,
+        }
+        self.call("answerCallbackQuery", &P {
+            callback_query_id: query_id.into(),
+            text: text.map(|s| s.into()),
+        }).await
     }
 }
