@@ -4,7 +4,7 @@ use flate2::read::ZlibDecoder;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::io::Read;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13,24 +13,78 @@ use tokio_tungstenite::tungstenite::Message;
 /// WebSocket event types received from Zalo.
 #[derive(Debug, Clone)]
 pub enum WsEvent {
+    /// Direct message (cmd 501).
     Message(Value),
+    /// Group message (cmd 521).
     GroupMessage(Value),
+    /// DM reaction (cmd 610).
     Reaction(Value),
+    /// Group reaction (cmd 611).
     GroupReaction(Value),
+    /// Message recall/undo — DM (cmd 312) or Group (cmd 322).
+    Undo { msg_id: String, thread_id: String, is_group: bool, data: Value },
+    /// Group lifecycle event (cmd 3001): join, leave, update, etc.
+    GroupEvent { event_type: String, group_id: String, data: Value },
+    /// Friend event (cmd 3101): friend request, etc.
+    FriendEvent { event_type: String, data: Value },
+    /// Typing indicator (cmd 801).
+    Typing { thread_id: String, is_group: bool },
+    /// Message seen/read receipt (cmd 802).
+    Seen { thread_id: String, msg_ids: Vec<String> },
+    /// Old messages catch-up (cmd 701).
+    OldMessages { messages: Vec<Value>, is_group: bool },
+    /// Old reactions catch-up (cmd 702).
+    OldReactions { reactions: Vec<Value>, is_group: bool },
+    /// WebSocket disconnected.
     Disconnected { code: u16, reason: String },
+    /// Any unhandled cmd.
     Other { cmd: i32, sub_cmd: u8, data: Value },
 }
 
-/// Run the WebSocket listener. Connects to Zalo's WS, handles auth handshake,
-/// decodes binary frames, and sends structured events via `tx`.
-/// Exits when `shutdown` receives a message or the connection drops.
+/// Run the WebSocket listener with automatic reconnection.
+/// Connects to Zalo's WS, handles auth handshake, decodes binary frames,
+/// and sends structured events via `tx`. Reconnects with exponential backoff.
+/// Exits when `shutdown` receives a message.
 pub async fn run_listener(
     _session: ZaloSession,
     ws_urls: Vec<String>,
     tx: mpsc::Sender<WsEvent>,
     mut shutdown: mpsc::Receiver<()>,
 ) -> Result<(), String> {
-    let url = pick_url(&ws_urls);
+    let mut backoff_secs: u64 = 1;
+    const MAX_BACKOFF: u64 = 60;
+
+    loop {
+        match connect_and_listen(&ws_urls, &tx, &mut shutdown).await {
+            Ok(()) => {
+                // Normal shutdown
+                break;
+            }
+            Err(e) => {
+                let _ = tx.send(WsEvent::Disconnected {
+                    code: 1006,
+                    reason: format!("{e} — reconnecting in {backoff_secs}s"),
+                }).await;
+
+                // Wait before reconnect or shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                    _ = shutdown.recv() => break,
+                }
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Connect once and listen until disconnect or shutdown.
+async fn connect_and_listen(
+    ws_urls: &[String],
+    tx: &mpsc::Sender<WsEvent>,
+    shutdown: &mut mpsc::Receiver<()>,
+) -> Result<(), String> {
+    let url = pick_url(ws_urls);
     let request = url
         .into_client_request()
         .map_err(|e| format!("build req: {e}"))?;
@@ -50,7 +104,6 @@ pub async fn run_listener(
                     Some(Ok(Message::Binary(data))) => {
                         if !pinged {
                             let parsed = parse_binary_frame(&data)?;
-                            // Cipher key exchange: cmd=1, subCmd=1, payload has "key"
                             if parsed.cmd == 1 && parsed.sub_cmd == 1 {
                                 if let Some(key) = parsed.payload["key"].as_str() {
                                     cipher_key = Some(key.to_string());
@@ -67,7 +120,7 @@ pub async fn run_listener(
                                 pinged = true;
                             }
                         } else {
-                            handle_event(&data, &cipher_key, &tx).await?;
+                            handle_event(&data, &cipher_key, tx).await?;
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
@@ -75,30 +128,24 @@ pub async fn run_listener(
                             .map(|f| (f.code.into(), f.reason.to_string()))
                             .unwrap_or((1000, String::new()));
                         let _ = tx.send(WsEvent::Disconnected { code, reason }).await;
-                        break;
+                        return Ok(());
                     }
                     Some(Ok(Message::Ping(d))) => {
                         let _ = write.send(Message::Pong(d)).await;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
-                        let _ = tx.send(WsEvent::Disconnected {
-                            code: 1006,
-                            reason: e.to_string(),
-                        }).await;
-                        break;
+                        return Err(format!("ws read: {e}"));
                     }
-                    None => break,
+                    None => return Ok(()),
                 }
             }
             _ = shutdown.recv() => {
                 let _ = write.close().await;
-                break;
+                return Ok(());
             }
         }
     }
-
-    Ok(())
 }
 
 /// Decode and dispatch a binary frame as a Zalo WS event.
@@ -200,26 +247,103 @@ async fn handle_event_inner(
     let Some(tx) = tx else { return Ok(()) };
 
     match frame.cmd {
+        // DM message
         501 => {
-            if let Some(msgs) = event_data["msgs"].as_array() {
-                for msg in msgs {
-                    let _ = tx.send(WsEvent::Message(msg.clone())).await;
-                }
+            for msg in array_items(&event_data["msgs"]) {
+                let _ = tx.send(WsEvent::Message(msg)).await;
             }
         }
+        // Group message
         521 => {
-            if let Some(msgs) = event_data["groupMsgs"].as_array() {
-                for msg in msgs {
-                    let _ = tx.send(WsEvent::GroupMessage(msg.clone())).await;
-                }
+            for msg in array_items(&event_data["groupMsgs"]) {
+                let _ = tx.send(WsEvent::GroupMessage(msg)).await;
             }
         }
+        // DM reaction
         610 => {
             let _ = tx.send(WsEvent::Reaction(event_data)).await;
         }
+        // Group reaction
         611 => {
             let _ = tx.send(WsEvent::GroupReaction(event_data)).await;
         }
+        // DM undo/recall
+        312 => {
+            let msg_id = event_data["content"]["globalMsgId"]
+                .as_str().or_else(|| event_data["data"]["msgId"].as_str())
+                .unwrap_or("").to_string();
+            let thread_id = event_data["content"]["callerId"]
+                .as_str().or_else(|| event_data["data"]["uidFrom"].as_str())
+                .unwrap_or("").to_string();
+            let _ = tx.send(WsEvent::Undo {
+                msg_id, thread_id, is_group: false, data: event_data,
+            }).await;
+        }
+        // Group undo/recall
+        322 => {
+            let msg_id = event_data["content"]["globalMsgId"]
+                .as_str().or_else(|| event_data["data"]["msgId"].as_str())
+                .unwrap_or("").to_string();
+            let thread_id = event_data["content"]["gridId"]
+                .as_str().or_else(|| event_data["data"]["idTo"].as_str())
+                .unwrap_or("").to_string();
+            let _ = tx.send(WsEvent::Undo {
+                msg_id, thread_id, is_group: true, data: event_data,
+            }).await;
+        }
+        // Group event (join, leave, update, etc.)
+        3001 => {
+            let event_type = event_data["event"]["type"]
+                .as_str().or_else(|| event_data["type"].as_str())
+                .unwrap_or("unknown").to_string();
+            let group_id = event_data["event"]["groupId"]
+                .as_str().or_else(|| event_data["groupId"].as_str())
+                .unwrap_or("").to_string();
+            let _ = tx.send(WsEvent::GroupEvent {
+                event_type, group_id, data: event_data,
+            }).await;
+        }
+        // Friend event
+        3101 => {
+            let event_type = event_data["type"]
+                .as_str().or_else(|| event_data["event"]["type"].as_str())
+                .unwrap_or("unknown").to_string();
+            let _ = tx.send(WsEvent::FriendEvent { event_type, data: event_data }).await;
+        }
+        // Typing indicator
+        801 => {
+            let thread_id = event_data["data"]["uid"]
+                .as_str().or_else(|| event_data["data"]["gid"].as_str())
+                .unwrap_or("").to_string();
+            let is_group = event_data["data"]["gid"].is_string();
+            let _ = tx.send(WsEvent::Typing { thread_id, is_group }).await;
+        }
+        // Seen/read receipt
+        802 => {
+            let thread_id = event_data["data"]["uid"]
+                .as_str().or_else(|| event_data["data"]["gid"].as_str())
+                .unwrap_or("").to_string();
+            let msg_ids: Vec<String> = vec![
+                event_data["data"]["msgId"].as_str().unwrap_or("").to_string(),
+                event_data["data"]["realMsgId"].as_str().unwrap_or("").to_string(),
+            ].into_iter().filter(|s| !s.is_empty()).collect();
+            let _ = tx.send(WsEvent::Seen { thread_id, msg_ids }).await;
+        }
+        // Old messages (catch-up)
+        701 => {
+            let is_group = event_data["groupMsgs"].is_array();
+            let key = if is_group { "groupMsgs" } else { "msgs" };
+            let messages = array_items(&event_data[key]);
+            let _ = tx.send(WsEvent::OldMessages { messages, is_group }).await;
+        }
+        // Old reactions (catch-up)
+        702 => {
+            let is_group = event_data["groupReact"].is_array();
+            let key = if is_group { "groupReact" } else { "react" };
+            let reactions = array_items(&event_data[key]);
+            let _ = tx.send(WsEvent::OldReactions { reactions, is_group }).await;
+        }
+        // Unhandled
         _ => {
             let _ = tx
                 .send(WsEvent::Other {
@@ -231,6 +355,17 @@ async fn handle_event_inner(
         }
     }
     Ok(())
+}
+
+/// Extract array items from a JSON value, handling both arrays and single objects.
+fn array_items(v: &Value) -> Vec<Value> {
+    if let Some(arr) = v.as_array() {
+        arr.clone()
+    } else if !v.is_null() {
+        vec![v.clone()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Build a Zalo-protocol binary frame.

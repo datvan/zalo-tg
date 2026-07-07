@@ -245,6 +245,30 @@ async fn handle_zalo_event(ctx: &BridgeCtx, event: WsEvent) {
         }
         WsEvent::Reaction(data) => handle_zalo_reaction(ctx, &data).await,
         WsEvent::GroupReaction(data) => handle_zalo_reaction(ctx, &data).await,
+        WsEvent::Undo { msg_id, thread_id, is_group, data } => {
+            handle_zalo_undo(ctx, &msg_id, &thread_id, is_group, &data).await;
+        }
+        WsEvent::GroupEvent { event_type, group_id, data } => {
+            handle_group_event(ctx, &event_type, &group_id, &data).await;
+        }
+        WsEvent::FriendEvent { event_type, data: _ } => {
+            log_line(&ctx.logs, format!("[ZALO] friend event: {event_type}")).await;
+        }
+        WsEvent::Typing { thread_id, is_group } => {
+            log_line(&ctx.logs, format!("[ZALO] typing: {thread_id} ({})", if is_group { "group" } else { "dm" })).await;
+        }
+        WsEvent::Seen { thread_id, msg_ids } => {
+            log_line(&ctx.logs, format!("[ZALO] seen: {thread_id} msgs={:?}", msg_ids)).await;
+        }
+        WsEvent::OldMessages { messages, is_group } => {
+            log_line(&ctx.logs, format!("[ZALO] old messages: {} msgs ({})", messages.len(), if is_group { "group" } else { "dm" })).await;
+            for m in messages {
+                forward_zalo_to_tg(ctx, &m, is_group).await;
+            }
+        }
+        WsEvent::OldReactions { reactions, is_group } => {
+            log_line(&ctx.logs, format!("[ZALO] old reactions: {} ({})", reactions.len(), if is_group { "group" } else { "dm" })).await;
+        }
         WsEvent::Disconnected { code, reason } => {
             log_line(&ctx.logs, format!("[WS] Disconnected: code={code} reason={reason}")).await;
         }
@@ -352,6 +376,69 @@ async fn handle_zalo_reaction(ctx: &BridgeCtx, data: &Value) {
         match client.set_message_reaction(ctx.tg_group_id, tg_msg_id, reaction).await {
             Ok(_) => log_line(&ctx.logs, format!("[Z→T] reaction {ricon} on msg {msg_id}")).await,
             Err(e) => log_line(&ctx.logs, format!("[TG] reaction error: {e}")).await,
+        }
+    }
+}
+
+/// Handle a Zalo message recall/undo event — delete or edit the TG message.
+async fn handle_zalo_undo(ctx: &BridgeCtx, msg_id: &str, thread_id: &str, is_group: bool, _data: &Value) {
+    let tg_msg_id = match ctx.db.get_tg_msg_id(msg_id) {
+        Some(id) => id,
+        None => {
+            log_line(&ctx.logs, format!("[ZALO] undo for unknown msg: {msg_id}")).await;
+            return;
+        }
+    };
+
+    let tg = ctx.tg.lock().await;
+    if let Some(ref client) = *tg {
+        match client.delete_message(ctx.tg_group_id, tg_msg_id).await {
+            Ok(_) => {
+                let _ = ctx.db.delete_msg_map_by_zalo(msg_id);
+                log_line(&ctx.logs, format!("[Z→T] undo: deleted TG msg {tg_msg_id} for {} {}",
+                    if is_group { "group" } else { "dm" }, thread_id)).await;
+            }
+            Err(e) => log_line(&ctx.logs, format!("[TG] delete error: {e}")).await,
+        }
+    }
+}
+
+/// Handle a Zalo group lifecycle event.
+async fn handle_group_event(ctx: &BridgeCtx, event_type: &str, group_id: &str, data: &Value) {
+    match event_type {
+        "join" => {
+            let member = data["event"]["memberId"]
+                .as_str().or_else(|| data["memberId"].as_str())
+                .unwrap_or("someone");
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: {member} joined")).await;
+        }
+        "leave" => {
+            let member = data["event"]["memberId"]
+                .as_str().or_else(|| data["memberId"].as_str())
+                .unwrap_or("someone");
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: {member} left")).await;
+        }
+        "remove_member" | "block_member" => {
+            let member = data["event"]["memberId"]
+                .as_str().or_else(|| data["memberId"].as_str())
+                .unwrap_or("someone");
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: {member} removed ({event_type})")).await;
+        }
+        "update" | "update_setting" => {
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: {event_type}")).await;
+        }
+        "update_board" | "remove_board" => {
+            // Poll-related board update
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: board {event_type}")).await;
+        }
+        "join_request" => {
+            let member = data["event"]["memberId"]
+                .as_str().or_else(|| data["memberId"].as_str())
+                .unwrap_or("someone");
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: join request from {member}")).await;
+        }
+        _ => {
+            log_line(&ctx.logs, format!("[ZALO] group {group_id}: {event_type}")).await;
         }
     }
 }
