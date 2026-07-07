@@ -172,11 +172,18 @@
               <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;padding-bottom:4px">
                 <div style="display:flex;align-items:center;gap:8px">
                   <input type="text" id="config-path" class="input mono" style="flex:1" placeholder=".env" readonly />
+                  <button id="btn-browse-env" class="btn btn-sm" title="Browse for .env file (shows hidden files)">Browse</button>
                   <button id="btn-default-env" class="btn btn-sm" title="Reload default .env">↺</button>
                 </div>
                 <p id="config-source" style="font-size:11px;color:var(--text-muted)"></p>
               </div>
               <div id="env-files-list" style="margin:4px 0 0;font-size:12px"></div>
+              <div id="env-drop-zone" class="drop-zone">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3v12M8 11l4 4 4-4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2"/>
+                </svg>
+                <span>Drop .env file here</span>
+              </div>
             </section>
 
             <section class="settings-group">

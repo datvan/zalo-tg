@@ -70,12 +70,40 @@ async fn get_config(
     })
 }
 
+#[derive(serde::Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[tauri::command]
+async fn scan_dir(
+    _state: tauri::State<'_, Mutex<AppState>>,
+    dir: String,
+) -> Result<Vec<FsEntry>, String> {
+    let path = PathBuf::from(&dir);
+    let mut entries: Vec<FsEntry> = std::fs::read_dir(&path)
+        .map_err(|e| format!("read dir {dir}: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let path = e.path().to_string_lossy().to_string();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            FsEntry { name, path, is_dir }
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
 #[tauri::command]
 async fn load_custom_env(
-    state: tauri::State<'_, Mutex<AppState>>,
+    _state: tauri::State<'_, Mutex<AppState>>,
     path: String,
 ) -> Result<AppConfig, String> {
-    let state = state.lock().await;
     let file_path = PathBuf::from(&path);
     let (vars, found) = config::load_file(&file_path);
     if !found {
@@ -226,6 +254,7 @@ fn main() {
             get_bridge_status,
             get_logs,
             get_config,
+            scan_dir,
             load_custom_env,
             save_config,
             list_env_files,

@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupControls();
   setupSettings();
   await loadConfig();
+  setupDragDrop();
   initChart();
   startPolling();
 });
@@ -416,8 +417,190 @@ function setupSettings() {
   });
 
   $('#btn-save-settings')?.addEventListener('click', saveSettings);
+  $('#btn-browse-env')?.addEventListener('click', pickEnvAndLoad);
   $('#btn-default-env')?.addEventListener('click', resetToDefaultEnv);
   $('#btn-add-var')?.addEventListener('click', addEnvRow);
+}
+
+function setupDragDrop() {
+  const dropZone = $('#env-drop-zone');
+  if (!dropZone) return;
+
+  let dropCounter = 0;
+
+  function showDrop() {
+    dropCounter++;
+    dropZone.classList.add('drag-over');
+  }
+
+  function hideDrop() {
+    dropCounter--;
+    if (dropCounter <= 0) {
+      dropCounter = 0;
+      dropZone.classList.remove('drag-over');
+    }
+  }
+
+  async function handleDrop(paths) {
+    dropZone.classList.remove('drag-over');
+    dropCounter = 0;
+    if (!paths || paths.length === 0) return;
+    const file = paths[0];
+    const name = file.replace(/^.*[/\\]/, '');
+    if (!name.startsWith('.env')) {
+      addActivity('Drop only .env files: ' + name, 'error');
+      return;
+    }
+    try {
+      const cfg = await invoke('load_custom_env', { path: file });
+      applyConfig(cfg);
+      addActivity('Dropped: ' + name, 'info');
+    } catch (e) {
+      addActivity('Load failed: ' + e, 'error');
+    }
+  }
+
+  // Listen for Tauri drag-drop events (gives real file paths)
+  try {
+    const { listen } = window.__TAURI__.event;
+    listen('tauri://drag-drop', (event) => {
+      const p = event.payload;
+      if (p.type === 'enter') showDrop();
+      else if (p.type === 'leave') hideDrop();
+      else if (p.type === 'drop') handleDrop(p.paths);
+    });
+  } catch (_) {}
+}
+
+async function pickEnvAndLoad() {
+  showFileBrowser();
+}
+
+function showFileBrowser() {
+  let overlay = $('#file-browser');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'file-browser';
+    overlay.className = 'modal-overlay';
+    overlay.style.display = 'none';
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title">Browse .env file</span>
+        <button class="btn btn-ghost btn-sm modal-close">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="browser-toolbar" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <button id="browser-up" class="btn btn-sm" title="Parent directory">↑</button>
+          <span id="browser-path" style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        </div>
+        <div id="browser-list" style="max-height:320px;overflow-y:auto"></div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:10px;color:var(--text-muted)">Hidden files are shown (including .env)</span>
+        <button id="browser-cancel" class="btn btn-sm">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  overlay.style.display = 'flex';
+
+  let currentDir = state.config?.source_files?.length
+    ? state.config.source_files[0].replace(/\/[^/]*$/, '')
+    : null;
+  if (!currentDir) {
+    // Use project dir — get from list_env_files
+    invoke('list_env_files').then(files => {
+      if (files && files.length > 0) {
+        currentDir = files[0].replace(/\/[^/]*$/, '');
+      } else {
+        currentDir = '/Users/wica/lq/zalo-tg';
+      }
+      loadBrowserDir(currentDir);
+    }).catch(() => {
+      currentDir = '/Users/wica/lq/zalo-tg';
+      loadBrowserDir(currentDir);
+    });
+  } else {
+    loadBrowserDir(currentDir);
+  }
+
+  overlay.querySelector('.modal-close')?.addEventListener('click', () => { overlay.style.display = 'none'; });
+  overlay.querySelector('#browser-cancel')?.addEventListener('click', () => { overlay.style.display = 'none'; });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
+}
+
+async function loadBrowserDir(dir) {
+  const list = $('#browser-list');
+  const pathEl = $('#browser-path');
+  const upBtn = $('#browser-up');
+  if (!list || !pathEl) return;
+
+  pathEl.textContent = dir;
+
+  // Up button
+  if (upBtn) {
+    const parent = dir.replace(/\/+$/, '').replace(/\/[^/]+$/, '') || '/';
+    upBtn.onclick = () => loadBrowserDir(parent);
+    upBtn.style.display = parent === '/' || parent === dir ? 'none' : '';
+  }
+
+  try {
+    const entries = await invoke('scan_dir', { dir });
+    list.innerHTML = '';
+
+    // .env files first, then dirs, then other files
+    const envFiles = entries.filter(e => !e.is_dir && e.name.startsWith('.env'));
+    const dirs = entries.filter(e => e.is_dir);
+    const others = entries.filter(e => !e.is_dir && !e.name.startsWith('.env'));
+
+    const allItems = [...envFiles, ...dirs, ...others];
+    if (allItems.length === 0) {
+      list.innerHTML = '<div class="empty-state">Empty directory</div>';
+      return;
+    }
+
+    for (const entry of allItems) {
+      const item = document.createElement('div');
+      item.className = 'browser-item';
+      if (entry.is_dir) {
+        item.innerHTML = `
+          <span style="color:var(--accent-violet);margin-right:6px">📁</span>
+          <span style="color:var(--text-primary)">${esc(entry.name)}/</span>
+        `;
+        item.addEventListener('click', () => loadBrowserDir(entry.path));
+        item.style.cursor = 'pointer';
+      } else if (entry.name.startsWith('.env')) {
+        item.innerHTML = `
+          <span style="color:var(--accent);margin-right:6px">📄</span>
+          <span style="color:var(--accent);font-weight:500">${esc(entry.name)}</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--accent)">Click to load</span>
+        `;
+        item.addEventListener('click', async () => {
+          try {
+            const cfg = await invoke('load_custom_env', { path: entry.path });
+            applyConfig(cfg);
+            addActivity('Loaded: ' + entry.name, 'info');
+            $('#file-browser').style.display = 'none';
+          } catch (e) {
+            addActivity('Load failed: ' + e, 'error');
+          }
+        });
+        item.style.cursor = 'pointer';
+      } else {
+        item.innerHTML = `
+          <span style="color:var(--text-muted);margin-right:6px">📄</span>
+          <span style="color:var(--text-muted)">${esc(entry.name)}</span>
+        `;
+        item.style.opacity = '0.5';
+      }
+      list.appendChild(item);
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="empty-state" style="color:var(--red)">Error: ' + esc(String(e)) + '</div>';
+  }
 }
 
 async function loadConfig() {
