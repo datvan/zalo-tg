@@ -2,7 +2,7 @@ use crate::config::BridgeConfig;
 use crate::store::Database;
 use crate::store::messages::MsgMapEntry;
 use crate::store::topics::TopicEntry;
-use crate::telegram::client::{ForumTopicCreated, ReactionParam, SendMessageParams, TelegramClient, TgMessageReaction, TgUpdate};
+use crate::telegram::client::{ForumTopicCreated, ReactionParam, SendMessageParams, TelegramClient, TgMessage, TgMessageReaction, TgUpdate};
 use crate::zalo::api::login::{self as zalo_login, ZaloCredentials};
 use crate::zalo::client::{ZaloClient, ZaloState};
 use crate::zalo::types::ThreadType;
@@ -10,7 +10,7 @@ use crate::zalo::ws::WsEvent;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 type LogBuf = Arc<Mutex<Vec<LogEntry>>>;
 
@@ -317,38 +317,229 @@ async fn forward_zalo_to_tg(ctx: &BridgeCtx, msg: &Value, is_group: bool) {
     };
 
     let display_name = ctx.db.get_user_name(uid_from).unwrap_or_else(|| dname.to_string());
-    let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
     let disable_notif = ctx.mute_silent;
-
+    let notif = if disable_notif { Some(true) } else { None };
     let tg = ctx.tg.lock().await;
-    if let Some(ref client) = *tg {
-        let params = SendMessageParams {
-            chat_id: ctx.tg_group_id,
-            text,
-            parse_mode,
-            message_thread_id: Some(topic_id),
-            reply_to_message_id: None,
-            disable_notification: if disable_notif { Some(true) } else { None },
-            reply_markup: None,
-        };
-        match client.send_message(&params).await {
-            Ok(resp) => {
-                let _ = ctx.db.insert_msg_map(&MsgMapEntry {
-                    zalo_msg_id: msg_id.clone(),
-                    tg_msg_id: resp.message_id,
-                    zalo_id: thread_id.to_string(),
-                    thread_type: thread_type as i64,
-                    uid_from: uid_from.to_string(),
-                    ts: data["ts"].as_i64().map(|n| n.to_string()).unwrap_or_default(),
-                    msg_type: msg_type.to_string(),
-                    content: content.to_string(),
-                    ttl: data["ttl"].as_i64().unwrap_or(0),
-                });
-                log_line(&ctx.logs, format!("[Z→T] {}: {} → topic {}", trunc_str(content, 50), display_name, topic_id)).await;
-            }
-            Err(e) => log_line(&ctx.logs, format!("[TG] send error: {e}")).await,
+
+    let send_result: Result<i64, String> = match msg_type {
+        "webchat" => {
+            let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+            send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
         }
+        "chat.photo" | "chat.doodle" => {
+            let media = parse_json_content(content);
+            send_photo_media(&tg, ctx.tg_group_id, topic_id, &media, &display_name, notif).await
+        }
+        "chat.video.msg" => {
+            let media = parse_json_content(content);
+            send_video_media(&tg, ctx.tg_group_id, topic_id, &media, &display_name, notif).await
+        }
+        "chat.voice" => {
+            let media = parse_json_content(content);
+            send_voice_media(&tg, ctx.tg_group_id, topic_id, &media, &display_name, notif).await
+        }
+        "share.file" => {
+            let media = parse_json_content(content);
+            send_file_media(&tg, ctx.tg_group_id, topic_id, &media, &display_name, notif).await
+        }
+        "chat.gif" => {
+            let media = parse_json_content(content);
+            let url = media["href"].as_str().or_else(|| media["url"].as_str()).unwrap_or("");
+            if !url.is_empty() {
+                match tg.as_ref().unwrap().send_animation(ctx.tg_group_id, url, Some(&format!("<b>{}</b>", escape_html(&display_name))), Some(topic_id), disable_notif).await {
+                    Ok(resp) => Ok(resp.message_id),
+                    Err(e) => Err(e),
+                }
+            } else {
+                let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+                send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
+            }
+        }
+        "chat.sticker" => {
+            let media = parse_json_content(content);
+            let url = media["href"].as_str().or_else(|| media["url"].as_str()).unwrap_or("");
+            if !url.is_empty() {
+                send_photo_media(&tg, ctx.tg_group_id, topic_id, &media, &display_name, notif).await
+            } else {
+                let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+                send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
+            }
+        }
+        "chat.recommended" => {
+            let media = parse_json_content(content);
+            let title = media["title"].as_str().unwrap_or(content);
+            let href = media["href"].as_str().or_else(|| media["url"].as_str()).unwrap_or("");
+            let desc = media["description"].as_str().unwrap_or("");
+            let thumb = media["thumb"].as_str().or_else(|| media["thumbnail"].as_str()).unwrap_or("");
+            if !href.is_empty() {
+                let caption = format!("<b>{}</b>\n\n{}\n{}", escape_html(&display_name), escape_html(title), href);
+                if !thumb.is_empty() {
+                    match tg.as_ref().unwrap().send_photo(ctx.tg_group_id, thumb, Some(&caption), Some(topic_id), disable_notif).await {
+                        Ok(resp) => Ok(resp.message_id),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    send_text(&tg, ctx.tg_group_id, topic_id, caption, Some("HTML".into()), notif).await
+                }
+            } else {
+                let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+                send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
+            }
+        }
+        "chat.location.new" => {
+            let media = parse_json_content(content);
+            let lat = media["latitude"].as_f64().or_else(|| media["lat"].as_f64());
+            let lon = media["longitude"].as_f64().or_else(|| media["lng"].as_f64()).or_else(|| media["lon"].as_f64());
+            match (lat, lon) {
+                (Some(lat), Some(lon)) => {
+                    match tg.as_ref().unwrap().send_location(ctx.tg_group_id, lat, lon, Some(topic_id), disable_notif).await {
+                        Ok(resp) => Ok(resp.message_id),
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => {
+                    let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+                    send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
+                }
+            }
+        }
+        _ => {
+            let (text, parse_mode) = format_zalo_message(&display_name, content, msg_type);
+            send_text(&tg, ctx.tg_group_id, topic_id, text, parse_mode, notif).await
+        }
+    };
+
+    match send_result {
+        Ok(tg_msg_id) => {
+            let _ = ctx.db.insert_msg_map(&MsgMapEntry {
+                zalo_msg_id: msg_id.clone(),
+                tg_msg_id,
+                zalo_id: thread_id.to_string(),
+                thread_type: thread_type as i64,
+                uid_from: uid_from.to_string(),
+                ts: data["ts"].as_i64().map(|n| n.to_string()).unwrap_or_default(),
+                msg_type: msg_type.to_string(),
+                content: content.to_string(),
+                ttl: data["ttl"].as_i64().unwrap_or(0),
+            });
+            log_line(&ctx.logs, format!("[Z→T] {} [{}] → topic {}", trunc_str(content, 50), msg_type, topic_id)).await;
+        }
+        Err(e) => log_line(&ctx.logs, format!("[TG] send error: {e}")).await,
     }
+}
+
+/// Parse a JSON content string, returning the parsed object or the original as null.
+fn parse_json_content(content: &str) -> Value {
+    serde_json::from_str(content).unwrap_or(Value::Null)
+}
+
+/// Send a text message via TG and return the message_id.
+async fn send_text(
+    tg: &MutexGuard<'_, Option<TelegramClient>>,
+    chat_id: i64,
+    thread_id: i64,
+    text: String,
+    parse_mode: Option<String>,
+    notif: Option<bool>,
+) -> Result<i64, String> {
+    let client = tg.as_ref().ok_or("no tg client")?;
+    let params = SendMessageParams {
+        chat_id, text, parse_mode,
+        message_thread_id: Some(thread_id),
+        reply_to_message_id: None,
+        disable_notification: notif,
+        reply_markup: None,
+    };
+    client.send_message(&params).await.map(|m| m.message_id)
+}
+
+async fn send_photo_media(
+    tg: &MutexGuard<'_, Option<TelegramClient>>,
+    chat_id: i64,
+    thread_id: i64,
+    media: &Value,
+    sender: &str,
+    notif: Option<bool>,
+) -> Result<i64, String> {
+    let client = tg.as_ref().ok_or("no tg client")?;
+    let url = media["href"].as_str()
+        .or_else(|| media["url"].as_str())
+        .or_else(|| media["thumb"].as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return Err("no photo url".into());
+    }
+    let caption = format!("<b>{}</b>", escape_html(sender));
+    let dn = notif.unwrap_or(false);
+    client.send_photo(chat_id, url, Some(&caption), Some(thread_id), dn)
+        .await.map(|m| m.message_id)
+}
+
+async fn send_video_media(
+    tg: &MutexGuard<'_, Option<TelegramClient>>,
+    chat_id: i64,
+    thread_id: i64,
+    media: &Value,
+    sender: &str,
+    notif: Option<bool>,
+) -> Result<i64, String> {
+    let client = tg.as_ref().ok_or("no tg client")?;
+    let url = media["href"].as_str()
+        .or_else(|| media["url"].as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return Err("no video url".into());
+    }
+    let caption = format!("<b>{}</b>", escape_html(sender));
+    let dn = notif.unwrap_or(false);
+    client.send_video(chat_id, url, Some(&caption), Some(thread_id), dn)
+        .await.map(|m| m.message_id)
+}
+
+async fn send_voice_media(
+    tg: &MutexGuard<'_, Option<TelegramClient>>,
+    chat_id: i64,
+    thread_id: i64,
+    media: &Value,
+    sender: &str,
+    notif: Option<bool>,
+) -> Result<i64, String> {
+    let client = tg.as_ref().ok_or("no tg client")?;
+    let url = media["href"].as_str()
+        .or_else(|| media["url"].as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return Err("no voice url".into());
+    }
+    let dn = notif.unwrap_or(false);
+    client.send_voice(chat_id, url, Some(thread_id), dn)
+        .await.map(|m| m.message_id)
+}
+
+async fn send_file_media(
+    tg: &MutexGuard<'_, Option<TelegramClient>>,
+    chat_id: i64,
+    thread_id: i64,
+    media: &Value,
+    sender: &str,
+    notif: Option<bool>,
+) -> Result<i64, String> {
+    let client = tg.as_ref().ok_or("no tg client")?;
+    let url = media["fileUrl"].as_str()
+        .or_else(|| media["file_url"].as_str())
+        .or_else(|| media["href"].as_str())
+        .or_else(|| media["url"].as_str())
+        .unwrap_or("");
+    let fname = media["fileName"].as_str()
+        .or_else(|| media["file_name"].as_str())
+        .unwrap_or("file");
+    if url.is_empty() {
+        return Err("no file url".into());
+    }
+    let caption = format!("<b>{}</b>\n{}", escape_html(sender), escape_html(fname));
+    let dn = notif.unwrap_or(false);
+    client.send_document(chat_id, url, Some(&caption), Some(thread_id), dn)
+        .await.map(|m| m.message_id)
 }
 
 async fn handle_zalo_reaction(ctx: &BridgeCtx, data: &Value) {
@@ -549,26 +740,162 @@ async fn handle_tg_update(ctx: &BridgeCtx, update: &TgUpdate) {
     }
 }
 
-async fn handle_tg_command(ctx: &BridgeCtx, msg: &crate::telegram::client::TgMessage, text: &str) {
-    let cmd = text.split(' ').next().unwrap_or(text);
+async fn handle_tg_command(ctx: &BridgeCtx, msg: &TgMessage, text: &str) {
+    let parts: Vec<&str> = text.splitn(3, ' ').collect();
+    let cmd = parts[0];
     let topic_id = msg.message_thread_id.unwrap_or(0);
+
+    let reply = match cmd {
+        "/status" | "/start" => {
+            let state = ctx.zc.state().await;
+            format!("🟢 Bridge status: {state:?}\n📊 Topics: {} | Messages: {}",
+                ctx.db.topic_count(), ctx.db.msg_map_count())
+        }
+        "/help" => {
+            "📖 Commands:\n\
+             /status — Bridge status\n\
+             /help — This help\n\
+             /search <phone> — Find Zalo user by phone\n\
+             /addfriend <uid> [msg] — Send friend request\n\
+             /topic list — List all topics\n\
+             /topic info <zalo_id> — Show topic for a Zalo ID\n\
+             /topic delete <zalo_id> — Delete topic mapping\n\
+             /recall — Recall replied-to Zalo message\n\
+             /info — Show this group's info\n\
+             /groups — List all Zalo groups".into()
+        }
+        "/search" => {
+            let query = parts.get(1).unwrap_or(&"");
+            if query.is_empty() {
+                "Usage: /search <phone>".into()
+            } else {
+                match ctx.zc.find_user(query).await {
+                    Ok(resp) => {
+                        let pretty = serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string());
+                        trunc_str(&pretty, 3500)
+                    }
+                    Err(e) => format!("Search error: {e}"),
+                }
+            }
+        }
+        "/addfriend" => {
+            let uid = parts.get(1).unwrap_or(&"");
+            if uid.is_empty() {
+                "Usage: /addfriend <uid> [message]".into()
+            } else {
+                let msg_text = parts.get(2).unwrap_or(&"Hi, let's connect!");
+                match ctx.zc.send_friend_request(uid, msg_text).await {
+                    Ok(resp) => {
+                        let ok = resp.get("data").and_then(|d| d.get("success")).and_then(|s| s.as_bool()).unwrap_or(false);
+                        if ok { format!("Friend request sent to {uid}") } else { format!("Request failed: {resp}") }
+                    }
+                    Err(e) => format!("Friend request error: {e}"),
+                }
+            }
+        }
+        "/topic" => {
+            let sub = parts.get(1).copied().unwrap_or("");
+            match sub {
+                "list" => {
+                    let topics = ctx.db.list_topics();
+                    if topics.is_empty() {
+                        "No topics yet".into()
+                    } else {
+                        let mut lines = Vec::new();
+                        for t in &topics {
+                            lines.push(format!("#{} — {} ({}{})",
+                                t.topic_id, t.name, t.zalo_id,
+                                if t.thread_type == 1 { " group" } else { "" }));
+                        }
+                        lines.join("\n")
+                    }
+                }
+                "info" => {
+                    let zalo_id = parts.get(2).unwrap_or(&"");
+                    if zalo_id.is_empty() { "Usage: /topic info <zalo_id>".into() }
+                    else {
+                        // try both thread types
+                        let t = ctx.db.get_topic_by_zalo(zalo_id, 0)
+                            .or_else(|| ctx.db.get_topic_by_zalo(zalo_id, 1));
+                        match t {
+                            Some(entry) => format!("#{} — {} (type {})", entry.topic_id, entry.name, entry.thread_type),
+                            None => format!("No topic found for {zalo_id}"),
+                        }
+                    }
+                }
+                "delete" => {
+                    let zalo_id = parts.get(2).unwrap_or(&"");
+                    if zalo_id.is_empty() { "Usage: /topic delete <zalo_id>".into() }
+                    else {
+                        ctx.db.remove_topic_by_zalo(zalo_id, 0);
+                        ctx.db.remove_topic_by_zalo(zalo_id, 1);
+                        format!("Deleted topic mapping for {zalo_id}")
+                    }
+                }
+                _ => "Subcommands: list, info <zalo_id>, delete <zalo_id>".into(),
+            }
+        }
+        "/recall" => {
+            let reply_to = msg.reply_to_message.as_ref().map(|r| r.message_id);
+            match reply_to {
+                Some(tg_id) => {
+                    match ctx.db.get_zalo_msg(tg_id) {
+                        Some(zmsg) => {
+                            match ctx.zc.recall_message(&zmsg.zalo_msg_id, "", &zmsg.zalo_id).await {
+                                Ok(_) => {
+                                    ctx.db.delete_msg_map_by_zalo(&zmsg.zalo_msg_id);
+                                    format!("Recalled message {tg_id}")
+                                }
+                                Err(e) => format!("Recall error: {e}"),
+                            }
+                        }
+                        None => "That message is not mapped to Zalo".into(),
+                    }
+                }
+                None => "Reply to a message to recall it".into(),
+            }
+        }
+        "/info" => {
+            match ctx.zc.get_all_groups().await {
+                Ok(resp) => {
+                    let summary = resp.get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|arr| format!("Total groups: {}", arr.len()))
+                        .unwrap_or_else(|| "No groups data".into());
+                    summary
+                }
+                Err(e) => format!("Info error: {e}"),
+            }
+        }
+        "/groups" => {
+            match ctx.zc.get_all_groups().await {
+                Ok(resp) => {
+                    let groups = resp.get("data").and_then(|d| d.as_array());
+                    match groups {
+                        Some(arr) => {
+                            let mut lines: Vec<String> = arr.iter().map(|g| {
+                                let name = g["name"].as_str().unwrap_or("?");
+                                let id = g["groupId"].as_str().or_else(|| g["group_id"].as_str()).unwrap_or("?");
+                                let member_count = g["totalMember"].as_i64().or_else(|| g["memberCount"].as_i64()).unwrap_or(0);
+                                format!("{name} ({id}) — {member_count} members")
+                            }).collect();
+                            lines.sort();
+                            lines.join("\n")
+                        }
+                        None => format!("Unexpected response: {}", trunc_str(&resp.to_string(), 500)),
+                    }
+                }
+                Err(e) => format!("Groups error: {e}"),
+            }
+        }
+        _ => {
+            log_line(&ctx.logs, format!("[TG] unhandled command: {cmd}")).await;
+            return;
+        }
+    };
 
     let tg = ctx.tg.lock().await;
     if let Some(ref client) = *tg {
-        let reply = match cmd {
-            "/status" | "/start" => {
-                let state = ctx.zc.state().await;
-                format!("🟢 Bridge status: {:?}\n📊 Topics: {} | Messages: {}",
-                    state, ctx.db.topic_count(), ctx.db.msg_map_count())
-            }
-            "/help" => {
-                "📖 Commands:\n/status — Show bridge status\n/help — Show this help".into()
-            }
-            _ => {
-                log_line(&ctx.logs, format!("[TG] unhandled command: {cmd}")).await;
-                return;
-            }
-        };
         let params = SendMessageParams {
             chat_id: msg.chat.id,
             text: reply,
