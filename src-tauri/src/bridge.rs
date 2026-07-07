@@ -80,9 +80,6 @@ impl BridgeOrchestrator {
                 format!("spawn bridge: {e}")
             })?;
 
-        let stdout = child.stdout;
-        let stderr = child.stderr;
-
         {
             let mut child_lock = self.child.lock().map_err(|e| format!("lock: {e}"))?;
             *child_lock = Some(child);
@@ -94,24 +91,34 @@ impl BridgeOrchestrator {
         *self.state.lock().map_err(|e| format!("lock: {e}"))? = BridgeState::Running;
 
         let logs = self.logs.clone();
-        if let Some(out) = stdout {
+        let child_stdout = {
+            let mut child_lock = self.child.lock().map_err(|e| format!("lock: {e}"))?;
+            child_lock.as_mut().and_then(|c| c.stdout.take())
+        };
+        let child_stderr = {
+            let mut child_lock = self.child.lock().map_err(|e| format!("lock: {e}"))?;
+            child_lock.as_mut().and_then(|c| c.stderr.take())
+        };
+
+        if let Some(out) = child_stdout {
+            let logs_clone = logs.clone();
             tokio::task::spawn_blocking(move || {
                 let reader = std::io::BufReader::new(out);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) => push_log(&logs, l),
+                        Ok(l) => push_log(&logs_clone, l),
                         Err(_) => break,
                     }
                 }
             });
         }
-        if let Some(err) = stderr {
-            let logs = self.logs.clone();
+        if let Some(err) = child_stderr {
+            let logs_clone = logs.clone();
             tokio::task::spawn_blocking(move || {
                 let reader = std::io::BufReader::new(err);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) => push_log(&logs, l),
+                        Ok(l) => push_log(&logs_clone, l),
                         Err(_) => break,
                     }
                 }
@@ -160,17 +167,22 @@ impl BridgeOrchestrator {
     }
 
     pub fn status(&self) -> BridgeStatus {
-        let mut child_lock = self.child.lock().unwrap_or_else(|_| return Mutex::new(None).lock().unwrap());
-        let running = child_lock
+        let mut child_guard = self.child.lock().ok();
+        let running = child_guard
             .as_mut()
+            .and_then(|g| g.as_mut())
             .map(|c| c.try_wait().ok().flatten().is_none())
             .unwrap_or(false);
-        let pid = child_lock.as_ref().and_then(|c| {
-            if running { Some(c.id()) } else { None }
-        });
+        let pid = child_guard
+            .as_ref()
+            .and_then(|g| g.as_ref())
+            .filter(|_| running)
+            .map(|c| c.id());
 
-        if !running && child_lock.is_some() {
-            *child_lock = None;
+        if !running {
+            if let Ok(mut guard) = self.child.lock() {
+                *guard = None;
+            }
         }
 
         let uptime = self
@@ -183,7 +195,9 @@ impl BridgeOrchestrator {
         let log_count = self.logs.lock().map(|l| l.len()).unwrap_or(0);
 
         if !running {
-            *self.state.lock().unwrap_or_else(|e| e.into_inner()) = BridgeState::Stopped;
+            if let Ok(mut s) = self.state.lock() {
+                *s = BridgeState::Stopped;
+            }
         }
 
         BridgeStatus {
