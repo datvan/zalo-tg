@@ -27,6 +27,7 @@ aes-gcm = "0.10"
 tokio-tungstenite = "0.24"
 flate2 = "1"
 hex = "0.4"
+urlencoding = "2"
 
 [dev-dependencies]
 wiremock = "0.6"
