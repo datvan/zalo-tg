@@ -811,4 +811,267 @@ impl TelegramClient {
             text: text.map(|s| s.into()),
         }).await
     }
+
+    /// Send a photo by URL or file_id.
+    pub async fn send_photo(
+        &self,
+        chat_id: i64,
+        photo: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            photo: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            caption: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            parse_mode: Option<String>,
+            disable_notification: bool,
+        }
+        self.call("sendPhoto", &P {
+            chat_id,
+            photo: photo.into(),
+            caption: caption.map(|s| s.into()),
+            message_thread_id: thread_id,
+            parse_mode: Some("HTML".into()),
+            disable_notification,
+        }).await
+    }
+
+    /// Send a document by URL or file_id.
+    pub async fn send_document(
+        &self,
+        chat_id: i64,
+        document: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            document: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            caption: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            parse_mode: Option<String>,
+            disable_notification: bool,
+        }
+        self.call("sendDocument", &P {
+            chat_id,
+            document: document.into(),
+            caption: caption.map(|s| s.into()),
+            message_thread_id: thread_id,
+            parse_mode: Some("HTML".into()),
+            disable_notification,
+        }).await
+    }
+
+    /// Send a video by URL or file_id.
+    pub async fn send_video(
+        &self,
+        chat_id: i64,
+        video: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            video: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            caption: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            parse_mode: Option<String>,
+            disable_notification: bool,
+        }
+        self.call("sendVideo", &P {
+            chat_id,
+            video: video.into(),
+            caption: caption.map(|s| s.into()),
+            message_thread_id: thread_id,
+            parse_mode: Some("HTML".into()),
+            disable_notification,
+        }).await
+    }
+
+    /// Send an animation (GIF) by URL or file_id.
+    pub async fn send_animation(
+        &self,
+        chat_id: i64,
+        animation: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            animation: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            caption: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            disable_notification: bool,
+        }
+        self.call("sendAnimation", &P {
+            chat_id,
+            animation: animation.into(),
+            caption: caption.map(|s| s.into()),
+            message_thread_id: thread_id,
+            disable_notification,
+        }).await
+    }
+
+    /// Send a voice message by URL or file_id.
+    pub async fn send_voice(
+        &self,
+        chat_id: i64,
+        voice: &str,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            voice: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            disable_notification: bool,
+        }
+        self.call("sendVoice", &P {
+            chat_id,
+            voice: voice.into(),
+            message_thread_id: thread_id,
+            disable_notification,
+        }).await
+    }
+
+    /// Send a sticker by file_id or emoji.
+    pub async fn send_sticker(
+        &self,
+        chat_id: i64,
+        sticker: &str,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            sticker: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            disable_notification: bool,
+        }
+        self.call("sendSticker", &P {
+            chat_id,
+            sticker: sticker.into(),
+            message_thread_id: thread_id,
+            disable_notification,
+        }).await
+    }
+
+    /// Send a location.
+    pub async fn send_location(
+        &self,
+        chat_id: i64,
+        latitude: f64,
+        longitude: f64,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            latitude: f64,
+            longitude: f64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            disable_notification: bool,
+        }
+        self.call("sendLocation", &P {
+            chat_id, latitude, longitude,
+            message_thread_id: thread_id,
+            disable_notification,
+        }).await
+    }
+
+    /// Create a poll.
+    pub async fn send_poll(
+        &self,
+        chat_id: i64,
+        question: &str,
+        options: Vec<&str>,
+        is_anonymous: bool,
+        thread_id: Option<i64>,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            question: String,
+            options: Vec<String>,
+            is_anonymous: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+        }
+        self.call("sendPoll", &P {
+            chat_id,
+            question: question.into(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+            is_anonymous,
+            message_thread_id: thread_id,
+        }).await
+    }
+
+    /// Stop a poll (close voting).
+    pub async fn stop_poll(&self, chat_id: i64, message_id: i64) -> Result<bool, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            message_id: i64,
+        }
+        self.call("stopPoll", &P { chat_id, message_id }).await
+    }
+
+    /// Get chat information.
+    pub async fn get_chat(&self, chat_id: i64) -> Result<serde_json::Value, String> {
+        #[derive(Serialize)]
+        struct P { chat_id: i64 }
+        self.call("getChat", &P { chat_id }).await
+    }
+
+    /// Forward a message from one chat to another.
+    pub async fn forward_message(
+        &self,
+        chat_id: i64,
+        from_chat_id: i64,
+        message_id: i64,
+        thread_id: Option<i64>,
+        disable_notification: bool,
+    ) -> Result<TgMessage, String> {
+        #[derive(Serialize)]
+        struct P {
+            chat_id: i64,
+            from_chat_id: i64,
+            message_id: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            disable_notification: bool,
+        }
+        self.call("forwardMessage", &P {
+            chat_id, from_chat_id, message_id,
+            message_thread_id: thread_id,
+            disable_notification,
+        }).await
+    }
 }

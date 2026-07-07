@@ -194,6 +194,68 @@ async fn get_topics(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<stor
     Ok(state.bridge.db().list_topics())
 }
 
+#[derive(serde::Serialize)]
+struct ContactInfo {
+    name: String,
+    id: String,
+    avatar: Option<String>,
+    members: Option<i64>,
+    alias: Option<String>,
+}
+
+#[tauri::command]
+async fn get_friends(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<ContactInfo>, String> {
+    let state = state.lock().await;
+    let zc = state.bridge.zalo_client();
+    match zc.get_all_friends().await {
+        Ok(data) => {
+            let friends = data.as_array()
+                .map(|arr| arr.iter().filter_map(|f| {
+                    Some(ContactInfo {
+                        name: f["displayName"].as_str().unwrap_or("Unknown").to_string(),
+                        id: f["userId"].as_str().unwrap_or("").to_string(),
+                        avatar: f["avatar"].as_str().map(|s| s.to_string()),
+                        members: None,
+                        alias: f["alias"].as_str().map(|s| s.to_string()),
+                    })
+                }).collect())
+                .unwrap_or_default();
+            Ok(friends)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+async fn get_groups(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<ContactInfo>, String> {
+    let state = state.lock().await;
+    let zc = state.bridge.zalo_client();
+    match zc.get_all_groups().await {
+        Ok(data) => {
+            let groups = data.as_array()
+                .map(|arr| arr.iter().filter_map(|g| {
+                    Some(ContactInfo {
+                        name: g["name"].as_str().unwrap_or("Unknown Group").to_string(),
+                        id: g["groupId"].as_str().unwrap_or("").to_string(),
+                        avatar: g["avatar"].as_str().map(|s| s.to_string()),
+                        members: g["totalMember"].as_i64(),
+                        alias: None,
+                    })
+                }).collect())
+                .unwrap_or_default();
+            Ok(groups)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+async fn get_zalo_state(state: tauri::State<'_, Mutex<AppState>>) -> Result<String, ()> {
+    let state = state.lock().await;
+    let zc = state.bridge.zalo_client();
+    Ok(format!("{:?}", zc.state().await))
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
@@ -281,6 +343,9 @@ fn main() {
             toggle_window,
             scan_dir,
             get_topics,
+            get_friends,
+            get_groups,
+            get_zalo_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
