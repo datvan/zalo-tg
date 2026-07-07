@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 mod bridge;
 mod config;
 mod store;
+mod telegram;
 
 use bridge::BridgeOrchestrator;
 use config::AppConfig;
