@@ -259,6 +259,225 @@ mod tests {
         let ok = client.send_chat_action(-100, "typing").await.unwrap();
         assert!(ok);
     }
+
+    // ── get_updates tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_updates_empty() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": []})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(None, None).await.unwrap();
+        assert!(updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_with_message() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": [{
+                        "update_id": 100,
+                        "message": {
+                            "message_id": 1,
+                            "chat": {"id": -100, "type": "supergroup", "title": "Test"},
+                            "text": "hello",
+                            "date": 1700000000,
+                            "from": {"id": 123, "is_bot": false, "first_name": "Alice"}
+                        }
+                    }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(Some(0), None).await.unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].update_id, 100);
+        let msg = updates[0].message.as_ref().unwrap();
+        assert_eq!(msg.text.as_deref(), Some("hello"));
+        assert_eq!(msg.chat.id, -100);
+        assert_eq!(msg.message_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_passes_offset() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": []})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(Some(42), Some(60)).await.unwrap();
+        assert!(updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_with_callback_query() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": [{
+                        "update_id": 200,
+                        "callback_query": {
+                            "id": "cq_1",
+                            "from": {"id": 456, "is_bot": false, "first_name": "Bob"},
+                            "data": "topic_123",
+                            "message": {
+                                "message_id": 5,
+                                "chat": {"id": -100, "type": "supergroup", "title": "Test"},
+                                "text": "press me",
+                                "date": 1700000001
+                            }
+                        }
+                    }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(None, None).await.unwrap();
+        assert_eq!(updates.len(), 1);
+        let cq = updates[0].callback_query.as_ref().unwrap();
+        assert_eq!(cq.id, "cq_1");
+        assert_eq!(cq.data.as_deref(), Some("topic_123"));
+        assert_eq!(cq.from.first_name, "Bob");
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_with_reaction() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": [{
+                        "update_id": 300,
+                        "message_reaction": {
+                            "chat": {"id": -100, "type": "supergroup", "title": "Test"},
+                            "message_id": 10,
+                            "date": 1700000002,
+                            "old_reaction": [],
+                            "new_reaction": [{"type": "emoji", "emoji": "👍"}]
+                        }
+                    }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(None, None).await.unwrap();
+        assert_eq!(updates.len(), 1);
+        let rxn = updates[0].message_reaction.as_ref().unwrap();
+        assert_eq!(rxn.message_id, 10);
+        assert_eq!(rxn.new_reaction.len(), 1);
+        assert_eq!(rxn.new_reaction[0].emoji.as_deref(), Some("👍"));
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_with_poll_answer() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true, "result": [{
+                        "update_id": 400,
+                        "poll_answer": {
+                            "poll_id": "poll_xyz",
+                            "user": {"id": 789, "is_bot": false, "first_name": "Charlie"},
+                            "option_ids": [0, 2]
+                        }
+                    }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let updates = client.get_updates(None, None).await.unwrap();
+        assert_eq!(updates.len(), 1);
+        let pa = updates[0].poll_answer.as_ref().unwrap();
+        assert_eq!(pa.poll_id, "poll_xyz");
+        assert_eq!(pa.option_ids, vec![0, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_get_updates_error() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": false, "description": "timeout"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let err = client.get_updates(None, Some(3)).await.unwrap_err();
+        assert!(err.contains("timeout"));
+    }
+
+    // ── answer_callback_query tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_answer_callback_query_success() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/answerCallbackQuery"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let ok = client.answer_callback_query("cq_1", Some("done")).await.unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_answer_callback_query_no_text() {
+        let mock_server = MockServer::start().await;
+        let client = TelegramClient::new_with_local("fake", &mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/answerCallbackQuery"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let ok = client.answer_callback_query("cq_2", None).await.unwrap();
+        assert!(ok);
+    }
 }
 
 use reqwest::Client as HttpClient;

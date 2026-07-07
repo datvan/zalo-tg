@@ -59,7 +59,7 @@ async fn get_logs(
     limit: usize,
 ) -> Result<Vec<bridge::LogEntry>, ()> {
     let state = state.lock().await;
-    Ok(state.bridge.get_logs(limit))
+    Ok(state.bridge.get_logs(limit).await)
 }
 
 #[tauri::command]
