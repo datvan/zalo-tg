@@ -1,7 +1,18 @@
+use crate::store::Database;
 use std::io::BufRead;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BridgeState {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Error(String),
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogEntry {
@@ -12,35 +23,35 @@ pub struct LogEntry {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BridgeStatus {
-    pub running: bool,
+    pub state: BridgeState,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
     pub log_count: usize,
+    pub topic_count: usize,
+    pub msg_count: usize,
 }
 
-fn shlex(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-pub struct BridgeProcess {
+pub struct BridgeOrchestrator {
     child: Mutex<Option<Child>>,
+    state: Mutex<BridgeState>,
     logs: Arc<Mutex<Vec<LogEntry>>>,
     started_at: Mutex<Option<Instant>>,
+    db: Arc<Database>,
 }
 
-impl Default for BridgeProcess {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BridgeProcess {
-    pub fn new() -> Self {
+impl BridgeOrchestrator {
+    pub fn new(db: Database) -> Self {
         Self {
             child: Mutex::new(None),
+            state: Mutex::new(BridgeState::Stopped),
             logs: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             started_at: Mutex::new(None),
+            db: Arc::new(db),
         }
+    }
+
+    pub fn db(&self) -> &Database {
+        &self.db
     }
 
     pub async fn start(&self, project_dir: &str) -> Result<(), String> {
@@ -51,19 +62,26 @@ impl BridgeProcess {
             }
         }
 
-        let mut child = Command::new("bash")
-            .args(["-l", "-c", &format!(
-                "cd {} && node --import tsx/esm src/index.ts",
-                shlex(&project_dir)
-            )])
+        *self.state.lock().map_err(|e| format!("lock: {e}"))? = BridgeState::Starting;
+
+        let script = format!(
+            "cd {} && node --import tsx/esm src/index.ts 2>&1",
+            shlex(project_dir)
+        );
+
+        let child = Command::new("bash")
+            .args(["-l", "-c", &script])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .spawn()
-            .map_err(|e| format!("spawn bridge: {e}"))?;
+            .map_err(|e| {
+                *self.state.lock().unwrap() = BridgeState::Error(e.to_string());
+                format!("spawn bridge: {e}")
+            })?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.stdout;
+        let stderr = child.stderr;
 
         {
             let mut child_lock = self.child.lock().map_err(|e| format!("lock: {e}"))?;
@@ -73,39 +91,27 @@ impl BridgeProcess {
             let mut started = self.started_at.lock().map_err(|e| format!("lock: {e}"))?;
             *started = Some(Instant::now());
         }
+        *self.state.lock().map_err(|e| format!("lock: {e}"))? = BridgeState::Running;
 
-        if let Some(stderr) = stderr {
-            let logs = self.logs.clone();
+        let logs = self.logs.clone();
+        if let Some(out) = stdout {
             tokio::task::spawn_blocking(move || {
-                let reader = std::io::BufReader::new(stderr);
+                let reader = std::io::BufReader::new(out);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) => {
-                            push_log(&logs, LogEntry {
-                                timestamp: now_str(),
-                                level: infer_level(&l),
-                                text: l,
-                            });
-                        }
+                        Ok(l) => push_log(&logs, l),
                         Err(_) => break,
                     }
                 }
             });
         }
-
-        if let Some(stdout) = stdout {
+        if let Some(err) = stderr {
             let logs = self.logs.clone();
             tokio::task::spawn_blocking(move || {
-                let reader = std::io::BufReader::new(stdout);
+                let reader = std::io::BufReader::new(err);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) => {
-                            push_log(&logs, LogEntry {
-                                timestamp: now_str(),
-                                level: infer_level(&l),
-                                text: l,
-                            });
-                        }
+                        Ok(l) => push_log(&logs, l),
                         Err(_) => break,
                     }
                 }
@@ -120,48 +126,52 @@ impl BridgeProcess {
         let mut child = child_lock.take().ok_or("Bridge is not running")?;
         drop(child_lock);
 
+        *self.state.lock().map_err(|e| format!("lock: {e}"))? = BridgeState::Stopping;
         {
             let mut started = self.started_at.lock().map_err(|e| format!("lock: {e}"))?;
             *started = None;
         }
 
         let pid = child.id();
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
 
         let start = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(_)) => {
+                    *self.state.lock().unwrap() = BridgeState::Stopped;
+                    return Ok(());
+                }
                 Ok(None) => {
                     if start.elapsed() > std::time::Duration::from_secs(5) {
-                        let _ = Command::new("kill")
-                            .arg("-KILL")
-                            .arg(pid.to_string())
-                            .status();
+                        let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
                         let _ = child.wait();
+                        *self.state.lock().unwrap() = BridgeState::Stopped;
                         return Ok(());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    *self.state.lock().unwrap() = BridgeState::Stopped;
+                    return Ok(());
+                }
             }
         }
     }
 
-    pub fn status_sync(&self) -> BridgeStatus {
-        let mut child_lock = self.child.lock().ok();
+    pub fn status(&self) -> BridgeStatus {
+        let mut child_lock = self.child.lock().unwrap_or_else(|_| return Mutex::new(None).lock().unwrap());
         let running = child_lock
             .as_mut()
-            .and_then(|c| c.as_mut())
             .map(|c| c.try_wait().ok().flatten().is_none())
             .unwrap_or(false);
-        let pid = child_lock
-            .as_ref()
-            .and_then(|c| c.as_ref().map(|c| c.id()));
-        drop(child_lock);
+        let pid = child_lock.as_ref().and_then(|c| {
+            if running { Some(c.id()) } else { None }
+        });
+
+        if !running && child_lock.is_some() {
+            *child_lock = None;
+        }
 
         let uptime = self
             .started_at
@@ -169,17 +179,24 @@ impl BridgeProcess {
             .ok()
             .and_then(|s| *s)
             .map(|t| t.elapsed().as_secs());
+
         let log_count = self.logs.lock().map(|l| l.len()).unwrap_or(0);
 
+        if !running {
+            *self.state.lock().unwrap_or_else(|e| e.into_inner()) = BridgeState::Stopped;
+        }
+
         BridgeStatus {
-            running,
+            state: self.state.lock().map(|s| s.clone()).unwrap_or(BridgeState::Stopped),
             pid,
             uptime_secs: uptime,
             log_count,
+            topic_count: self.db.topic_count(),
+            msg_count: self.db.msg_map_count(),
         }
     }
 
-    pub fn get_logs_sync(&self, limit: usize) -> Vec<LogEntry> {
+    pub fn get_logs(&self, limit: usize) -> Vec<LogEntry> {
         self.logs
             .lock()
             .map(|logs| {
@@ -194,13 +211,21 @@ impl BridgeProcess {
     }
 }
 
-fn push_log(logs: &Arc<Mutex<Vec<LogEntry>>>, entry: LogEntry) {
+fn push_log(logs: &Arc<Mutex<Vec<LogEntry>>>, line: String) {
     if let Ok(mut guard) = logs.lock() {
         if guard.len() >= 1000 {
             guard.remove(0);
         }
-        guard.push(entry);
+        guard.push(LogEntry {
+            timestamp: now_str(),
+            level: infer_level(&line),
+            text: line,
+        });
     }
+}
+
+fn shlex(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn now_str() -> String {
@@ -208,10 +233,12 @@ fn now_str() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = d.as_secs();
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
+    format!(
+        "{:02}:{:02}:{:02}",
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60
+    )
 }
 
 fn infer_level(line: &str) -> String {
