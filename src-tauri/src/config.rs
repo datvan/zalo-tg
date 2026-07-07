@@ -11,6 +11,59 @@ pub struct AppConfig {
     pub vars: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BridgeConfig {
+    pub tg_token: String,
+    pub tg_group_id: i64,
+    pub data_dir: PathBuf,
+    pub zalo_credentials_path: Option<PathBuf>,
+    pub local_bot_api: Option<String>,
+    pub skip_muted_groups: bool,
+    pub mute_silent: bool,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            tg_token: String::new(),
+            tg_group_id: 0,
+            data_dir: PathBuf::from(PROJECT_ROOT).join("data"),
+            zalo_credentials_path: None,
+            local_bot_api: None,
+            skip_muted_groups: false,
+            mute_silent: false,
+        }
+    }
+}
+
+impl BridgeConfig {
+    pub fn from_vars(vars: &HashMap<String, String>) -> Self {
+        Self {
+            tg_token: vars.get("TG_TOKEN").cloned().unwrap_or_default(),
+            tg_group_id: vars
+                .get("TG_GROUP_ID")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            data_dir: vars
+                .get("DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(PROJECT_ROOT).join("data")),
+            zalo_credentials_path: vars
+                .get("ZALO_CREDENTIALS_PATH")
+                .map(PathBuf::from),
+            local_bot_api: vars.get("LOCAL_BOT_API").cloned(),
+            skip_muted_groups: vars
+                .get("ZALO_SKIP_MUTED_GROUPS")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
+            mute_silent: vars
+                .get("ZALO_MUTE_SILENT")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
+        }
+    }
+}
+
 pub fn parse_env(content: &str) -> HashMap<String, String> {
     let mut vars = HashMap::new();
     for line in content.lines() {
