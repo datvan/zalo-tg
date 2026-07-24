@@ -356,9 +356,22 @@ async function hasAudioStream(inputPath: string): Promise<boolean> {
   return out.includes('audio');
 }
 
-async function normalizeForZalo(inputPath: string, suffix = ''): Promise<string> {
+/**
+ * Narrow, explicit, operator-invoked escape hatch for a specific known-silent-at-source
+ * video (confirmed via yt-dlp + DASH manifest scan + browser network sniffing that
+ * Facebook/TikTok/etc. never serves an audio track for it at all — not a download bug).
+ * Scoped by canonical key via env var so it never silently weakens the general
+ * anti-silent-video guard for anything else. Meant to be set only for the duration of
+ * manually clearing one specific stuck job, then unset.
+ */
+function isSilentUploadAllowed(url: string): boolean {
+  const allowed = (process.env.SOCIAL_VIDEO_ALLOW_SILENT_KEYS || '').split(',').map(s => s.trim()).filter(Boolean);
+  return allowed.includes(canonicalSocialVideoKey(url));
+}
+
+async function normalizeForZalo(inputPath: string, suffix = '', allowSilent = false): Promise<string> {
   if (!(await hasVideoStream(inputPath))) throw new Error(`Downloaded social media has no video stream: ${inputPath}`);
-  if (!(await hasAudioStream(inputPath))) throw new Error(`Downloaded social media has no audio stream; refusing to upload silent video: ${inputPath}`);
+  if (!allowSilent && !(await hasAudioStream(inputPath))) throw new Error(`Downloaded social media has no audio stream; refusing to upload silent video: ${inputPath}`);
   const outputPath = path.join(TMP_DIR, `social_zalo_${Date.now()}${suffix}.mp4`);
   await new Promise<void>((resolve, reject) => {
     const p = spawn('ffmpeg', [
@@ -778,8 +791,12 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
   const mediaCandidates = candidates.filter(name => !name.endsWith('.info.json'));
   const infoPath = candidates.find(name => name.endsWith('.info.json'));
   const sortedMediaCandidates = mediaCandidates.sort((a, b) => statSync(b).size - statSync(a).size);
+  const allowSilent = isSilentUploadAllowed(url);
   if (!rawPath) for (const candidate of sortedMediaCandidates) {
-    if (await hasVideoStream(candidate) && await hasAudioStream(candidate)) {
+    const hasVideo = await hasVideoStream(candidate);
+    const hasAudio = await hasAudioStream(candidate);
+    console.log(`[SocialVideo][Download] fallback candidate=${candidate} video=${hasVideo} audio=${hasAudio}${allowSilent ? ' (silent upload allowed for this key)' : ''}`);
+    if (hasVideo && (hasAudio || allowSilent)) {
       rawPath = candidate;
       break;
     }
@@ -874,15 +891,15 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
 
   let outPath: string | undefined;
   try {
-    console.log(`[SocialVideo][Normalize] start raw=${rawPath}`);
-    outPath = await normalizeForZalo(rawPath);
+    console.log(`[SocialVideo][Normalize] start raw=${rawPath}${allowSilent ? ' (silent upload allowed for this key)' : ''}`);
+    outPath = await normalizeForZalo(rawPath, '', allowSilent);
     console.log(`[SocialVideo][Normalize] OK out=${outPath} size=${statSync(outPath).size}`);
-    if (!(await hasAudioStream(outPath))) throw new Error(`Normalized social video has no audio stream; refusing to upload silent video: ${outPath}`);
+    if (!allowSilent && !(await hasAudioStream(outPath))) throw new Error(`Normalized social video has no audio stream; refusing to upload silent video: ${outPath}`);
     const durationSeconds = await probeDurationSeconds(rawPath);
     const paths = await splitForZalo(rawPath, outPath);
     console.log(`[SocialVideo][Split] OK parts=${paths.length} sizes=${paths.map(p => statSync(p).size).join(',')}`);
     for (const p of paths) {
-      if (!(await hasAudioStream(p))) throw new Error(`Output social video segment has no audio stream; refusing to upload silent video: ${p}`);
+      if (!allowSilent && !(await hasAudioStream(p))) throw new Error(`Output social video segment has no audio stream; refusing to upload silent video: ${p}`);
     }
     meta = {
       ...meta,
