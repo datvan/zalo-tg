@@ -6,22 +6,10 @@ import type { ZaloAPI } from '../zalo/types.js';
 import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, mediaGroupStore } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4, getVideoInfo } from '../utils/media.js';
-import { extractSocialVideoUrls, enqueueSocialVideo, downloadSocialVideo, formatSocialVideoCaption, createSocialVideoThumbnail, withUploadTimeout } from '../utils/socialVideo.js';
-import { rememberSelfVideoCaption, rememberSelfVideoFallback } from '../utils/selfVideoCaption.js';
-import {
-  beginSocialVideoJob,
-  completeSocialVideoJob,
-  createDurableSocialVideoJob,
-  failSocialVideoJob,
-  listReplayableSocialVideoJobs,
-  markSocialVideoJobPartDone,
-  socialVideoJobPartClientId,
-  type DurableSocialVideoJob,
-} from '../utils/durableSocialVideoQueue.js';
-import { sendZaloVideoWithClientId } from '../utils/zaloSendVideoWithClientId.js';
-import { canAutoRepostSocialVideoTopic } from '../utils/socialVideoPolicy.js';
+import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4 } from '../utils/media.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, socialVideoLabel, formatSocialVideoCaption } from '../utils/socialVideo.js';
 
+const ALLOWED_SOCIAL_VIDEO_TOPIC_IDS = new Set<number>([35]); // Only Xom 2 con Bao may auto download/reup social videos
 import { triggerQRLogin } from '../zalo/client.js';
 import { canUseBridge, rejectUnauthorized } from '../security.js';
 import { markHealth } from '../health.js';
@@ -169,183 +157,15 @@ export function setupTelegramHandler(
 ): (api: ZaloAPI) => void {
   /** Mutable reference so /login can swap in a new API instance. */
   let currentApi: ZaloAPI | null = initialApi;
-  const queuedDurableSocialVideoJobs = new Set<string>();
-
-  const notifySocialVideoJobError = async (job: DurableSocialVideoJob, action: string, err: unknown) => {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    await tgBot.telegram
-      .sendMessage(
-        config.telegram.groupId,
-        `Social video failed: <b>${action}</b>\n<code>${errMsg}</code>\n${job.url}`,
-        { message_thread_id: job.topicId, parse_mode: 'HTML' },
-      )
-      .catch(() => undefined);
-  };
-
-  const runDurableSocialVideoJob = async (api: ZaloAPI, job: DurableSocialVideoJob): Promise<void> => {
-    const localPaths: string[] = [];
-    try {
-      console.log(`[TG->Zalo][SocialVideo] Downloading ${job.label}: ${job.url}`);
-      const downloaded = await downloadSocialVideo(job.url);
-      localPaths.push(...downloaded.paths);
-      const sleepSocialUpload = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-      const withSocialUploadTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs = Number(process.env.SOCIAL_UPLOAD_TIMEOUT_MS || 120_000)): Promise<T> => {
-        let timer: NodeJS.Timeout | undefined;
-        try {
-          return await Promise.race([
-            promise,
-            new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); }),
-          ]);
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
-      };
-      const uploadSocialVideoWithRetry = async (localPath: string, partLabel: string) => {
-        let lastErr: unknown;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            return await withSocialUploadTimeout(api.uploadAttachment(localPath, job.zaloId, job.threadType) as Promise<Array<{
-              fileUrl?: string;
-              normalUrl?: string;
-              hdUrl?: string;
-              thumbUrl?: string;
-            }>>, `[TGZalo][SocialVideo] uploadAttachment ${partLabel}`);
-          } catch (err) {
-            lastErr = err;
-            if (attempt >= 3) break;
-            const delay = 2000 * attempt;
-            console.warn(`[TGZalo][SocialVideo] uploadAttachment ${partLabel} failed (${attempt}/3), retrying in ${delay}ms:`, err);
-            await sleepSocialUpload(delay);
-          }
-        }
-        throw lastErr;
-      };
-      const sendSocialVideoPartWithRetry = async (localPath: string, partIndex: number, partLabel: string, partCaption: string) => {
-        let lastErr: unknown;
-        const clientId = socialVideoJobPartClientId(job.id, partIndex);
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            if (attempt > 1) console.log(`[TG->Zalo][SocialVideo] Retry upload+send ${partLabel} attempt=${attempt}/3`);
-            const uploaded = await uploadSocialVideoWithRetry(localPath, partLabel);
-            console.log(`[TG->Zalo][SocialVideo] Upload result ${partLabel} attempt=${attempt}/3:`, JSON.stringify(uploaded[0] ?? {}));
-            const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
-            let thumbnailPath: string | undefined;
-            let thumbnailUrl: string | undefined;
-            const videoInfo = await getVideoInfo(localPath).catch(() => ({ durationMs: 30_000, width: 720, height: 1280 }));
-            try {
-              thumbnailPath = await createSocialVideoThumbnail(localPath);
-              const thumbnailUploaded = await withSocialUploadTimeout(api.uploadAttachment(thumbnailPath, job.zaloId, job.threadType) as Promise<Array<{
-                fileUrl?: string;
-                normalUrl?: string;
-                hdUrl?: string;
-                thumbUrl?: string;
-              }>>, `[TG->Zalo][SocialVideo] uploadThumbnail ${partLabel}`);
-              thumbnailUrl = thumbnailUploaded[0]?.thumbUrl ?? thumbnailUploaded[0]?.normalUrl ?? thumbnailUploaded[0]?.hdUrl ?? thumbnailUploaded[0]?.fileUrl;
-              console.log(`[TG->Zalo][SocialVideo] Thumbnail result ${partLabel} attempt=${attempt}/3:`, JSON.stringify(thumbnailUploaded[0] ?? {}));
-            } finally {
-              if (thumbnailPath) cleanTemp(thumbnailPath);
-            }
-            if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
-            const sendResult = await sendZaloVideoWithClientId(api, {
-              msg: '',
-              videoUrl: nativeVideoUrl,
-              thumbnailUrl,
-              duration: videoInfo.durationMs,
-              width: videoInfo.width,
-              height: videoInfo.height,
-            }, job.zaloId, job.threadType, clientId) as { msgId?: number | string; message?: { msgId?: number | string } } | undefined;
-            if (partCaption.trim()) {
-              try {
-                sentMsgStore.markPendingSelf(job.zaloId, job.threadType as 0 | 1, partCaption);
-                await api.sendMessage({ msg: partCaption }, job.zaloId, job.threadType);
-              } catch (captionErr) {
-                console.warn(`[TG->Zalo][SocialVideo] caption send failed ${partLabel}:`, captionErr);
-              }
-            }
-            markSocialVideoJobPartDone(job.id, partIndex, clientId, sendResult);
-            return { sendResult, uploaded };
-          } catch (err) {
-            lastErr = err;
-            if (attempt >= 3) break;
-            const delay = 3000 * attempt;
-            console.warn(`[TGZalo][SocialVideo] upload+send ${partLabel} failed (${attempt}/3), retrying in ${delay}ms:`, err);
-            await sleepSocialUpload(delay);
-          }
-        }
-        throw lastErr;
-      };
-      for (let i = 0; i < localPaths.length; i++) {
-        if (job.sentParts?.[String(i)]) {
-          console.log(`[TG->Zalo][SocialVideo] Skip already-sent part ${i + 1}/${localPaths.length} job=${job.id}`);
-          continue;
-        }
-        const partLabel = `part ${i + 1}/${localPaths.length}`;
-        const partCaption = formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined);
-        const { sendResult } = await sendSocialVideoPartWithRetry(localPaths[i], i, partLabel, partCaption);
-        rememberSelfVideoCaption(sendResult, partCaption);
-        rememberSelfVideoFallback(sendResult, localPaths[i], partCaption);
-        console.log(`[TG->Zalo][SocialVideo] Sent native video ${partLabel} target=${job.threadType}:${job.zaloId} result=${JSON.stringify(sendResult ?? {})}`);
-      }
-    } finally {
-      for (const localPath of localPaths) await cleanTemp(localPath);
-    }
-  };
-
-  const enqueueDurableSocialVideoJob = (api: ZaloAPI, job: DurableSocialVideoJob): void => {
-    if (queuedDurableSocialVideoJobs.has(job.id) || job.status === 'done' || job.status === 'failed') return;
-    queuedDurableSocialVideoJobs.add(job.id);
-    const scheduleRetry = (delayMs: number) => {
-      const timer = setTimeout(() => {
-        queuedDurableSocialVideoJobs.delete(job.id);
-        if (currentApi) enqueueDurableSocialVideoJob(currentApi, job);
-      }, delayMs);
-      timer.unref?.();
-    };
-    void enqueueSocialVideo(`tg:${job.threadType}:${job.zaloId}`, `${job.label}:telegram`, async () => {
-      const started = beginSocialVideoJob(job.id);
-      if (!started || started.status === 'done' || started.status === 'failed') return;
-      try {
-        await runDurableSocialVideoJob(api, started);
-        completeSocialVideoJob(job.id);
-      } catch (err) {
-        const failed = failSocialVideoJob(job.id, err);
-        if (failed?.status === 'pending') {
-          const delay = Math.min(60_000, 10_000 * Math.max(1, failed.attempts));
-          console.warn(`[SocialVideo][Durable] retry ${failed.id} in ${delay}ms`);
-          scheduleRetry(delay);
-          return;
-        }
-        if (failed) await notifySocialVideoJobError(failed, 'socialVideo', err);
-        throw err;
-      }
-    }, job.id).catch(err => {
-      const failed = failSocialVideoJob(job.id, err);
-      if (failed?.status === 'pending') scheduleRetry(30_000);
-    }).finally(() => {
-      queuedDurableSocialVideoJobs.delete(job.id);
-    });
-  };
-
-  const replayDurableSocialVideoJobs = (api: ZaloAPI): void => {
-    const jobs = listReplayableSocialVideoJobs();
-    if (jobs.length) console.log(`[SocialVideo][Durable] replaying ${jobs.length} job(s)`);
-    for (const job of jobs) enqueueDurableSocialVideoJob(api, job);
-  };
 
   /** Exposed setter so index.ts can inject the auto-logged-in API. */
-  const setCurrentApi = (api: ZaloAPI) => {
-    currentApi = api;
-    replayDurableSocialVideoJobs(api);
-  };
-
-  if (initialApi) replayDurableSocialVideoJobs(initialApi);
+  const setCurrentApi = (api: ZaloAPI) => { currentApi = api; };
 
   tgBot.command('login', async (ctx) => {
     if (!canUseBridge(ctx)) { await rejectUnauthorized(ctx); return; }
     const threadId = ctx.message.message_thread_id;
     await handleLoginCommand(ctx.chat.id, threadId, (newApi) => {
       currentApi = newApi;
-      replayDurableSocialVideoJobs(newApi);
       void onZaloLogin(newApi).catch((e: unknown) => console.error('[/login] onZaloLogin error:', e));
     });
   });
@@ -722,22 +542,22 @@ export function setupTelegramHandler(
       const notifyError = async (action: string, err: unknown) => {
         const errMsg = err instanceof Error ? err.message : String(err);
         const code = (err as { code?: number }).code;
-        console.error(`[TG→Zalo] ${action} failed (zaloId=${zaloId}, type=${threadType}):`, err);
+        console.error(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] ${action} failed (zaloId=${zaloId}, type=${threadType}):`, err);
 
         // Provide a friendlier explanation for common Zalo error codes
         let hint = '';
         if (code === 114) {
           hint = threadType === ThreadType.User
-            ? '\n💡 <i>Zalo từ chối: chưa kết bạn hoặc người dùng đã bật giới hạn tin nhắn từ người lạ.</i>'
-            : '\n💡 <i>Zalo từ chối tham số (code 114).</i>';
+            ? '\nÃƒÂ°Ã…Â¸Ã¢â‚¬â„¢Ã‚Â¡ <i>Zalo tÃƒÂ¡Ã‚Â»Ã‚Â« chÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi: chÃƒâ€ Ã‚Â°a kÃƒÂ¡Ã‚ÂºÃ‚Â¿t bÃƒÂ¡Ã‚ÂºÃ‚Â¡n hoÃƒÂ¡Ã‚ÂºÃ‚Â·c ngÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Âi dÃƒÆ’Ã‚Â¹ng Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ bÃƒÂ¡Ã‚ÂºÃ‚Â­t giÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi hÃƒÂ¡Ã‚ÂºÃ‚Â¡n tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n tÃƒÂ¡Ã‚Â»Ã‚Â« ngÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Âi lÃƒÂ¡Ã‚ÂºÃ‚Â¡.</i>'
+            : '\nÃƒÂ°Ã…Â¸Ã¢â‚¬â„¢Ã‚Â¡ <i>Zalo tÃƒÂ¡Ã‚Â»Ã‚Â« chÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi tham sÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœ (code 114).</i>';
         } else if (code === -216) {
-          hint = '\n💡 <i>Phiên đăng nhập Zalo hết hạn. Dùng /login để đăng nhập lại.</i>';
+          hint = '\nÃƒÂ°Ã…Â¸Ã¢â‚¬â„¢Ã‚Â¡ <i>PhiÃƒÆ’Ã‚Âªn Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­p Zalo hÃƒÂ¡Ã‚ÂºÃ‚Â¿t hÃƒÂ¡Ã‚ÂºÃ‚Â¡n. DÃƒÆ’Ã‚Â¹ng /login Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­p lÃƒÂ¡Ã‚ÂºÃ‚Â¡i.</i>';
         }
 
         await tgBot.telegram
           .sendMessage(
             config.telegram.groupId,
-            `⚠️ Gửi thất bại: <b>${action}</b>\n<code>${errMsg}${code != null ? ` (code ${code})` : ''}</code>${hint}`,
+            `ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â GÃƒÂ¡Ã‚Â»Ã‚Â­i thÃƒÂ¡Ã‚ÂºÃ‚Â¥t bÃƒÂ¡Ã‚ÂºÃ‚Â¡i: <b>${action}</b>\n<code>${errMsg}${code != null ? ` (code ${code})` : ''}</code>${hint}`,
             { message_thread_id: topicId, parse_mode: 'HTML' },
           )
           .catch(() => undefined);
@@ -746,23 +566,73 @@ export function setupTelegramHandler(
       if ('text' in msg && msg.text) {
         // Skip bot commands that were already handled above
         if (msg.text.startsWith('/')) return;
-        const socialVideoUrls = extractSocialVideoUrls(msg.text);
-        if (socialVideoUrls.length > 0) {
-          if (!canAutoRepostSocialVideoTopic(topicId)) {
-            console.log(`[TG->Zalo][SocialVideo] Disabled by allowlist for topicId=${topicId}; forwarding link text only`);
+        const socialVideoUrl = extractSocialVideoUrl(msg.text);
+        if (socialVideoUrl) {
+          if (!ALLOWED_SOCIAL_VIDEO_TOPIC_IDS.has(topicId)) {
+            console.log(`[TGÃ¢â€ â€™Zalo][SocialVideo] Disabled by allowlist for topicId=${topicId}; forwarding link text only`);
           } else {
-            for (const socialVideoUrl of socialVideoUrls) {
-              const job = createDurableSocialVideoJob({
-                sourceMessageId: msg.message_id,
-                topicId,
-                text: msg.text,
-                url: socialVideoUrl,
-                zaloId,
-                threadType,
-              });
-              enqueueDurableSocialVideoJob(api, job);
+          const label = socialVideoLabel(socialVideoUrl);
+          void enqueueSocialVideo(`tg:${threadType}:${zaloId}`, `${label}:telegram`, async () => {
+            const localPaths: string[] = [];
+            try {
+              console.log(`[TGÃ¢â€ â€™Zalo][SocialVideo] Downloading ${label}: ${socialVideoUrl}`);
+              const downloaded = await downloadSocialVideo(socialVideoUrl);
+              localPaths.push(...downloaded.paths);
+              const socialCaption = formatSocialVideoCaption(downloaded.meta);
+              const sleepSocialUpload = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+              const withSocialUploadTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs = Number(process.env.SOCIAL_UPLOAD_TIMEOUT_MS || 120_000)): Promise<T> => {
+                let timer: NodeJS.Timeout | undefined;
+                try {
+                  return await Promise.race([
+                    promise,
+                    new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); }),
+                  ]);
+                } finally {
+                  if (timer) clearTimeout(timer);
+                }
+              };
+              const uploadSocialVideoWithRetry = async (localPath: string, partLabel: string) => {
+                let lastErr: unknown;
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                  try {
+                    return await withSocialUploadTimeout(api.uploadAttachment(localPath, zaloId, threadType) as Promise<Array<{
+                      fileUrl?: string;
+                      normalUrl?: string;
+                      hdUrl?: string;
+                      thumbUrl?: string;
+                    }>>, `[TGZalo][SocialVideo] uploadAttachment ${partLabel}`);
+                  } catch (err) {
+                    lastErr = err;
+                    if (attempt >= 3) break;
+                    const delay = 2000 * attempt;
+                    console.warn(`[TGZalo][SocialVideo] uploadAttachment ${partLabel} failed (${attempt}/3), retrying in ${delay}ms:`, err);
+                    await sleepSocialUpload(delay);
+                  }
+                }
+                throw lastErr;
+              };
+              for (let i = 0; i < localPaths.length; i++) {
+                const uploaded = await uploadSocialVideoWithRetry(localPaths[i], `part ${i + 1}/${localPaths.length}`);
+                console.log(`[TGÃ¢â€ â€™Zalo][SocialVideo] Upload result part ${i + 1}/${localPaths.length}:`, JSON.stringify(uploaded[0] ?? {}));
+                const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+                const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
+                if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+                const partCaption = formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined);
+                const sendResult = await api.sendVideo({
+                  msg: partCaption,
+                  videoUrl: nativeVideoUrl,
+                  thumbnailUrl,
+                  duration: 30_000,
+                  width: 720,
+                  height: 1280,
+                }, zaloId, threadType);
+                console.log(`[TGâ†’Zalo][SocialVideo] Sent native video part ${i + 1}/${localPaths.length} target=${threadType}:${zaloId} uploadFileId=${(uploaded[0] as any)?.fileId ?? '-'} result=${JSON.stringify(sendResult ?? {})}`);
+              }
+            } finally {
+              for (const lp of localPaths) await cleanTemp(lp);
             }
-            return;
+          }).catch(err => { void notifyError('socialVideo', err); });
+          return;
           }
         }
         console.log(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] sendMessage ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
@@ -802,9 +672,7 @@ export function setupTelegramHandler(
             }
             throw err;
           });
-          sentMsgStore.markPendingSelf(zaloId, threadType, msg.text);
-          const typedSendResult = sendResult as { message?: { msgId?: number | string } | null; msgId?: number | string } | undefined;
-          const zaloMsgId = typedSendResult?.message?.msgId ?? typedSendResult?.msgId;
+          const zaloMsgId = sendResult?.message?.msgId;
           if (zaloMsgId !== undefined) {
             sentMsgStore.save(msg.message_id, { msgId: zaloMsgId, zaloId, threadType });
           }
@@ -840,67 +708,6 @@ export function setupTelegramHandler(
           `sendAttachment(${filename})`,
           new Error(`File${sizeMb} vÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£t giÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi hÃƒÂ¡Ã‚ÂºÃ‚Â¡n 20 MB cÃƒÂ¡Ã‚Â»Ã‚Â§a Telegram Bot API ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â khÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ tÃƒÂ¡Ã‚ÂºÃ‚Â£i xuÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng`),
         );
-      };
-
-      const sendNativeVideoAttachment = async (
-        fileId: string,
-        filename: string,
-        fileSize?: number,
-        caption?: string,
-      ) => {
-        if (fileSize !== undefined && fileSize > TG_FILE_LIMIT) {
-          await notifyTooBig(filename, fileSize);
-          return;
-        }
-        let fileLink: URL;
-        try {
-          fileLink = await getFileLinkWithRetry(fileId);
-        } catch (err: unknown) {
-          const isTooBig = err instanceof Error && err.message.includes('file is too big');
-          if (isTooBig) { await notifyTooBig(filename, fileSize); return; }
-          throw err;
-        }
-        const localPath = await downloadToTempWithRetry(fileLink.toString(), filename);
-        try {
-          const withVideoTimeout = async <T>(label: string, p: Promise<T>, timeoutMs = 180_000): Promise<T> => {
-            let timer: NodeJS.Timeout | undefined;
-            try {
-              return await Promise.race([
-                p,
-                new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); }),
-              ]);
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
-          };
-          console.log(`[TG?Zalo][Video] Native upload ${filename} ? zaloId=${zaloId} type=${threadType}`);
-          const uploaded = await withVideoTimeout(`[TG?Zalo][Video] uploadAttachment ${filename}`, api.uploadAttachment(localPath, zaloId, threadType) as Promise<Array<{
-            fileUrl?: string;
-            normalUrl?: string;
-            hdUrl?: string;
-            thumbUrl?: string;
-          }>>);
-          const nativeVideoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
-          const thumbnailUrl = uploaded[0]?.thumbUrl ?? nativeVideoUrl;
-          if (!nativeVideoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
-          const sendResult = await api.sendVideo({
-            msg: caption ?? '',
-            videoUrl: nativeVideoUrl,
-            thumbnailUrl,
-            duration: 30_000,
-            width: 720,
-            height: 1280,
-          }, zaloId, threadType);
-          rememberSelfVideoCaption(sendResult, caption ?? '');
-          const zaloMsgId = (sendResult as { msgId?: number })?.msgId;
-          if (zaloMsgId !== undefined) sentMsgStore.save(msg.message_id, { msgId: zaloMsgId, zaloId, threadType });
-          markHealth({ status: 'ok', lastTgToZaloSuccessAt: new Date().toISOString() });
-          console.log(`[TG?Zalo][Video] Send OK: ${filename} result=${JSON.stringify(sendResult ?? {})}`);
-        } catch (err) {
-          await notifyError(`sendVideoAttachment(${filename})`, err);
-        } finally {
-          await cleanTemp(localPath);
-        }
       };
 
       const sendAttachment = async (
@@ -1093,7 +900,7 @@ export function setupTelegramHandler(
           );
           return;
         }
-        await sendNativeVideoAttachment(vid.file_id, fname, vid.file_size, cap);
+        await sendAttachment(vid.file_id, fname, vid.file_size, cap, capMentions);
         return;
       }
 
@@ -1116,7 +923,7 @@ export function setupTelegramHandler(
         try {
           m4aPath = await convertToM4a(oggPath);
           // Upload to Zalo CDN to get a voiceUrl
-          const uploaded = await withUploadTimeout(api.uploadAttachment(m4aPath, zaloId, threadType), '[TG?Zalo][Voice] uploadAttachment') as Array<{ fileUrl?: string }>;
+          const uploaded = await api.uploadAttachment(m4aPath, zaloId, threadType) as Array<{ fileUrl?: string }>;
           const voiceUrl = uploaded[0]?.fileUrl;
           if (!voiceUrl) throw new Error('No fileUrl from uploadAttachment');
           console.log(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] Sending voice ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ ${voiceUrl}`);
@@ -1165,7 +972,7 @@ export function setupTelegramHandler(
           try {
             mp4Path = await convertToMp4(webmPath);
             console.log(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] Uploading video sticker MP4 ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ zaloId=${zaloId} type=${threadType}`);
-            const uploaded = await withUploadTimeout(api.uploadAttachment(mp4Path, zaloId, threadType), '[TG?Zalo][VideoSticker] uploadAttachment') as Array<{
+            const uploaded = await api.uploadAttachment(mp4Path, zaloId, threadType) as Array<{
               fileUrl?: string;
               normalUrl?: string;
               hdUrl?: string;
@@ -1221,7 +1028,7 @@ export function setupTelegramHandler(
           try {
             mp4Path = await convertTgsToMp4(tgsPath);
             console.log(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] Uploading animated sticker MP4 ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ zaloId=${zaloId} type=${threadType}`);
-            const uploaded = await withUploadTimeout(api.uploadAttachment(mp4Path, zaloId, threadType), '[TG?Zalo][AnimatedSticker] uploadAttachment') as Array<{
+            const uploaded = await api.uploadAttachment(mp4Path, zaloId, threadType) as Array<{
               fileUrl?: string;
               normalUrl?: string;
               hdUrl?: string;
@@ -1538,9 +1345,6 @@ export function setupTelegramHandler(
 }
 
 // Called by setupTelegramHandler, but defined after so we can reference tgBot directly.
-
-
-
 
 
 

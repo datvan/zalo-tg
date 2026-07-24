@@ -1,4 +1,4 @@
-﻿import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'fs';
+﻿import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { cleanTemp } from './media.js';
@@ -9,10 +9,7 @@ import { downloadThreadsViaBrowser } from './threadsBrowserFallback.js';
 import { downloadFacebookViaBrowser } from './facebookBrowserFallback.js';
 
 const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
-// Stop at JSON/string delimiters when Zalo embeds link previews as serialized payloads.
-const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/i;
-const SOCIAL_VIDEO_RE_GLOBAL = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/ig;
-const UNSUPPORTED_SOCIAL_POST_RE = /https?:\/\/(?:www\.|m\.)?facebook\.com\/share\/(?:p|post)\/\S+/i;
+const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/\S+|youtube\.com\/\S+|youtu\.be\/\S+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/\S+|fb\.watch\/\S+|threads\.(?:com|net)\/\S+|vk\.com\/video\S+|vkvideo\.ru\/video\S+)/i;
 const MAX_BYTES = 100 * 1024 * 1024;
 const TARGET_SEGMENT_BYTES = 90 * 1024 * 1024;
 const MAX_QUEUE_PER_THREAD = 10;
@@ -21,7 +18,6 @@ const SOCIAL_QUEUE_STALE_MS = Number(process.env.SOCIAL_QUEUE_STALE_MS || 15 * 6
 
 const DEFAULT_YTDLP_BIN = 'C:\\Users\\Admin\\AppData\\Roaming\\Python\\Python311\\Scripts\\yt-dlp.exe';
 const DEFAULT_FB_COOKIES_PATH = path.resolve(process.cwd(), 'data', 'facebook-cookies.txt');
-const DEFAULT_FB_COOKIE_JSON_PATH = 'J:\\CrawBot\\Cookies\\www.facebook.com_12-07-2026.json';
 let loggedYtDlpBin = false;
 
 function getYtDlpCommand(): { command: string; argsPrefix: string[] } {
@@ -35,45 +31,10 @@ function getYtDlpCommand(): { command: string; argsPrefix: string[] } {
   return { command: bin, argsPrefix };
 }
 
-function facebookCookiesPath(): string | undefined {
-  const explicitPath = process.env.FB_COOKIES_PATH?.trim();
-  if (explicitPath && existsSync(explicitPath)) return explicitPath;
-
-  const jsonPath = process.env.FB_COOKIE_JSON_PATH?.trim() || DEFAULT_FB_COOKIE_JSON_PATH;
-  if (!existsSync(jsonPath)) return existsSync(DEFAULT_FB_COOKIES_PATH) ? DEFAULT_FB_COOKIES_PATH : undefined;
-  try {
-    const parsed = JSON.parse(readFileSync(jsonPath, 'utf8')) as { cookies?: Array<Record<string, unknown>> };
-    const cookies = (parsed.cookies ?? []).map(cookie => {
-      const domain = String(cookie.domain ?? '.facebook.com');
-      const httpOnly = Boolean(cookie.httpOnly);
-      const expires = Number(cookie.expirationDate ?? cookie.expires ?? 0);
-      return [
-        `${httpOnly ? '#HttpOnly_' : ''}${domain}`,
-        domain.startsWith('.') ? 'TRUE' : 'FALSE',
-        String(cookie.path ?? '/'),
-        cookie.secure === false ? 'FALSE' : 'TRUE',
-        Number.isFinite(expires) && expires > 0 ? String(Math.floor(expires)) : '0',
-        String(cookie.name ?? ''),
-        String(cookie.value ?? ''),
-      ].join('\t');
-    }).filter(row => row.split('\t')[5] && row.split('\t')[6]);
-    if (!cookies.some(row => row.includes('\tc_user\t')) || !cookies.some(row => row.includes('\txs\t'))) {
-      console.warn('[SocialVideo] Facebook cookie JSON has no usable login session');
-      return undefined;
-    }
-    mkdirSync(path.dirname(DEFAULT_FB_COOKIES_PATH), { recursive: true });
-    writeFileSync(DEFAULT_FB_COOKIES_PATH, `# Netscape HTTP Cookie File\n${cookies.join('\n')}\n`, { mode: 0o600 });
-    return DEFAULT_FB_COOKIES_PATH;
-  } catch (err) {
-    console.warn('[SocialVideo] Facebook cookie JSON unreadable:', err instanceof Error ? err.message : err);
-    return existsSync(DEFAULT_FB_COOKIES_PATH) ? DEFAULT_FB_COOKIES_PATH : undefined;
-  }
-}
-
 function getYtDlpCookiesArgs(url: string): string[] {
   if (/facebook\.com|fb\.watch/i.test(url)) {
-    const cookiePath = facebookCookiesPath();
-    if (!cookiePath) return [];
+    const cookiePath = process.env.FB_COOKIES_PATH?.trim() || DEFAULT_FB_COOKIES_PATH;
+    if (!existsSync(cookiePath)) return [];
     return ['--cookies', cookiePath];
   }
   const tiktokCookiePath = process.env.TIKTOK_COOKIES_PATH?.trim() || path.resolve(process.cwd(), 'data', 'tiktok-cookies.txt');
@@ -127,9 +88,6 @@ export interface SocialVideoMeta {
   platform: string;
   uploader?: string;
   title?: string;
-  sourceUrl?: string;
-  durationSeconds?: number;
-  sizeBytes?: number;
 }
 
 export interface SocialVideoDownloadResult {
@@ -144,20 +102,7 @@ let globalRunning = false;
 let currentJobStartedAtMs = 0;
 let currentJobLabel: string | undefined;
 
-const UPLOAD_ATTACHMENT_TIMEOUT_MS = Number(process.env.ZALO_UPLOAD_ATTACHMENT_TIMEOUT_MS || 120_000);
-
-/**
- * zca-js's uploadAttachment() has no built-in timeout: a stalled Zalo CDN connection
- * (observed as `fetch failed` / `UND_ERR_SOCKET other side closed`) can hang the call
- * indefinitely, wedging the social-video queue and eventually the whole process. Every
- * uploadAttachment() call site should go through this so a stuck upload fails fast into
- * its caller's existing fallback/retry path instead of hanging.
- */
-export function withUploadTimeout<T>(promise: Promise<T>, label: string, timeoutMs = UPLOAD_ATTACHMENT_TIMEOUT_MS): Promise<T> {
-  return withTimeout(promise, timeoutMs, label);
-}
-
-export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`Social video job timeout after ${Math.round(timeoutMs / 1000)}s: ${label}`)), timeoutMs);
@@ -179,39 +124,24 @@ setInterval(() => {
 }, 60_000).unref();
 
 export function extractSocialVideoUrl(text: string): string | undefined {
-  return extractSocialVideoUrls(text)[0];
-}
-
-export function extractSocialVideoUrls(text: string): string[] {
-  const urls: string[] = [];
-  const seen = new Set<string>();
-  for (const match of text.matchAll(SOCIAL_VIDEO_RE_GLOBAL)) {
-    const url = match[0].replace(/[\])}>.,!?'\"]+$/, '');
-    // TikTok photo posts are not videos. yt-dlp currently returns "Unsupported URL" for
-    // /@user/photo/<id>, so do not enqueue them into the social-video repost pipeline.
-    // The original message/link will still be bridged as plain text.
-    if (/tiktok\.com\/[^\s]+\/photo\/\d+/i.test(url)) continue;
-    const key = canonicalSocialVideoKey(url);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    urls.push(url);
-  }
-  return urls;
+  const match = text.match(SOCIAL_VIDEO_RE);
+  if (!match) return undefined;
+  const url = match[0].replace(/[\])}>.,!?]+$/, '');
+  // TikTok photo posts are not videos. yt-dlp currently returns "Unsupported URL" for
+  // /@user/photo/<id>, so do not enqueue them into the social-video repost pipeline.
+  // The original message/link will still be bridged as plain text.
+  if (/tiktok\.com\/[^\s]+\/photo\/\d+/i.test(url)) return undefined;
+  return url;
 }
 
 
 
 export function extractUnsupportedSocialPostUrl(text: string): { url: string; reason: string } | undefined {
   const match = text.match(SOCIAL_VIDEO_RE);
-  if (!match) {
-    const unsupportedMatch = text.match(UNSUPPORTED_SOCIAL_POST_RE);
-    if (!unsupportedMatch) return undefined;
-    const unsupportedUrl = unsupportedMatch[0].replace(/[\])}>.,!?]+$/, '');
-    return { url: unsupportedUrl, reason: 'Link này là Facebook post, không phải video nên bridge không tự tải/repost dạng video.' };
-  }
+  if (!match) return undefined;
   const url = match[0].replace(/[\])}>.,!?]+$/, '');
   if (/tiktok\.com\/[^\s]+\/photo\/\d+/i.test(url)) {
-    return { url, reason: 'Link nÃƒÂ y lÃƒÂ  TikTok photo post, khÃƒÂ´ng phÃ¡ÂºÂ£i video nÃƒÂªn bridge chÃ†Â°a hÃ¡Â»â€” trÃ¡Â»Â£ tÃ¡ÂºÂ£i/upload tÃ¡Â»Â± Ã„â€˜Ã¡Â»â„¢ng.' };
+    return { url, reason: 'Link nÃ y lÃ  TikTok photo post, khÃ´ng pháº£i video nÃªn bridge chÆ°a há»— trá»£ táº£i/upload tá»± Ä‘á»™ng.' };
   }
   return undefined;
 }
@@ -379,24 +309,6 @@ async function normalizeForZalo(inputPath: string, suffix = ''): Promise<string>
   return outputPath;
 }
 
-export async function createSocialVideoThumbnail(inputPath: string): Promise<string> {
-  const outputPath = path.join(TMP_DIR, `social_thumb_${Date.now()}.jpg`);
-  await new Promise<void>((resolve, reject) => {
-    const p = spawn('ffmpeg', [
-      '-y', '-ss', '0.5', '-i', inputPath,
-      '-frames:v', '1',
-      '-vf', 'scale=480:-2',
-      '-q:v', '4',
-      outputPath,
-    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    p.stderr.on('data', d => { stderr += String(d); });
-    p.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg thumbnail exit ${code}: ${stderr.slice(-1000)}`)));
-    p.on('error', reject);
-  });
-  return outputPath;
-}
-
 async function probeDurationSeconds(inputPath: string): Promise<number> {
   const out = await new Promise<string>((resolve, reject) => {
     const p = spawn('ffprobe', [
@@ -473,72 +385,6 @@ function cleanTitleText(value: unknown): string | undefined {
   const cleaned = cleanMetaText(value);
   if (!cleaned || /^video$/i.test(cleaned)) return undefined;
   return cleaned;
-}
-
-
-function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;|&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function extractAttr(html: string, name: string): string | undefined {
-  const m = html.match(new RegExp(`${name}=["']([^"']+)["']`, 'i'));
-  return m ? decodeHtmlEntities(m[1]) : undefined;
-}
-
-async function downloadThreadsViaSnapSave(url: string, outPath: string): Promise<void> {
-  const base = 'https://snapsave.vn/';
-  const headers: Record<string, string> = {
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
-    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'accept-language': 'vi,en-US;q=0.9,en;q=0.8',
-  };
-  const home = await fetch(base, { headers, redirect: 'follow' });
-  const homeText = await home.text();
-  const token = homeText.match(/name=["']_token["']\s+value=["']([^"']+)["']/i)?.[1]
-    || homeText.match(/value=["']([^"']+)["']\s+name=["']_token["']/i)?.[1];
-  if (!token) throw new Error('SnapSave token not found');
-  const cookie = home.headers.get('set-cookie')?.split(',').map(x => x.split(';')[0]).join('; ');
-  const postHeaders: Record<string, string> = {
-    ...headers,
-    'accept': 'application/json, text/javascript, */*; q=0.01',
-    'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    'origin': 'https://snapsave.vn',
-    'referer': base,
-    'x-requested-with': 'XMLHttpRequest',
-  };
-  if (cookie) postHeaders.cookie = cookie;
-  const body = new URLSearchParams({ _token: token, platform: 'threads', url });
-  const fetchRes = await fetch('https://snapsave.vn/fetch', { method: 'POST', headers: postHeaders, body });
-  const fetchTextRes = await fetchRes.text();
-  if (!fetchRes.ok) throw new Error(`SnapSave fetch HTTP ${fetchRes.status}: ${fetchTextRes.slice(0, 240)}`);
-  let json: any;
-  try { json = JSON.parse(fetchTextRes); } catch { throw new Error(`SnapSave fetch non-JSON: ${fetchTextRes.slice(0, 240)}`); }
-  if (!json?.status) throw new Error(`SnapSave fetch failed: ${String(json?.message || fetchTextRes).slice(0, 240)}`);
-  const resultHtml = String(json.data || json.html || json.result || '');
-  const videoFormMatch = resultHtml.match(/<form[^>]+name=["']media-download-[^"']+["'][\s\S]*?<\/form>/i);
-  const videoForm = videoFormMatch?.[0];
-  if (!videoForm) throw new Error('SnapSave media-download form not found');
-  const mediaToken = extractAttr(videoForm.match(/name=["']_token["'][^>]*>/i)?.[0] || '', 'value') || token;
-  const username = extractAttr(videoForm.match(/name=["']username["'][^>]*>/i)?.[0] || '', 'value') || '';
-  const actionType = extractAttr(videoForm.match(/name=["']action_type["'][^>]*>/i)?.[0] || '', 'value') || 'download';
-  const selectMatch = videoForm.match(/<select[^>]+name=["']url["'][\s\S]*?<\/select>/i)?.[0] || videoForm;
-  const encryptedUrl = extractAttr(selectMatch.match(/<option[^>]+value=["'][^"']+["'][^>]*>/i)?.[0] || '', 'value');
-  if (!encryptedUrl) throw new Error('SnapSave encrypted media URL not found');
-  const mediaBody = new URLSearchParams({ _token: mediaToken, username, action_type: actionType, url: encryptedUrl });
-  const mediaRes = await fetch('https://snapsave.vn/media-download', { method: 'POST', headers: postHeaders, body: mediaBody, redirect: 'follow' });
-  if (!mediaRes.ok) {
-    const errText = await mediaRes.text().catch(() => '');
-    throw new Error(`SnapSave media-download HTTP ${mediaRes.status}: ${errText.slice(0, 240)}`);
-  }
-  const buf = Buffer.from(await mediaRes.arrayBuffer());
-  if (buf.length < 1024 * 32) throw new Error(`SnapSave media-download too small: ${buf.length}`);
-  writeFileSync(outPath, buf);
-  console.warn(`[SocialVideo] SnapSave Threads fallback downloaded bytes=${buf.length}`);
 }
 
 async function downloadTikTokViaTikwm(url: string, outPath: string): Promise<void> {
@@ -634,41 +480,10 @@ async function fetchSocialVideoMeta(url: string): Promise<SocialVideoMeta> {
   }
 }
 
-function formatDuration(seconds?: number): string | undefined {
-  if (!Number.isFinite(seconds) || !seconds || seconds <= 0) return undefined;
-  const total = Math.max(0, Math.round(seconds));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function formatSize(bytes?: number): string | undefined {
-  if (!Number.isFinite(bytes) || !bytes || bytes <= 0) return undefined;
-  return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
-}
-
-function formatSharer(uploader?: string): string | undefined {
-  const clean = cleanMetaText(uploader);
-  if (!clean) return undefined;
-  if (clean.startsWith('@')) return clean;
-  if (/^[A-Za-z0-9._-]{2,64}$/.test(clean)) return `@${clean}`;
-  return clean;
-}
-
 export function formatSocialVideoCaption(meta: SocialVideoMeta, partLabel?: string): string {
-  const title = cleanTitleText(meta.title) ?? 'Video';
-  const platform = cleanMetaText(meta.platform);
-  const headingBase = platform ? `${title} - ${platform}` : title;
-  const lines = [
-    `📘 ${partLabel ? `[${partLabel}] ` : ''}${headingBase}`,
-    formatDuration(meta.durationSeconds) ? `⏱️ ${formatDuration(meta.durationSeconds)}` : undefined,
-    formatSize(meta.sizeBytes) ? `💾 ${formatSize(meta.sizeBytes)}` : undefined,
-    meta.sourceUrl ? `🔗 ${meta.sourceUrl}` : undefined,
-    formatSharer(meta.uploader) ? `👤 Chia sẻ bởi: ${formatSharer(meta.uploader)}` : undefined,
-  ].filter(Boolean) as string[];
-  return lines.join('\n').slice(0, 1000);
+  const parts = [meta.platform, meta.uploader, meta.title].filter(Boolean);
+  const caption = parts.length > 1 ? parts.join(' - ') : `${meta.platform} - ${meta.title ?? 'Video'}${meta.uploader ? ` - ${meta.uploader}` : ''}`;
+  return `${partLabel ? `[${partLabel}] ` : ''}${caption}`.slice(0, 1000);
 }
 
 function metaFromInfoJson(data: Record<string, unknown>, platform: string): SocialVideoMeta {
@@ -759,16 +574,8 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
       await downloadThreadsViaBrowser(url, fallbackPath);
     } else {
       if (!/tiktok\.com/i.test(url)) throw downloadErr;
-      console.warn(`[SocialVideo] TikTok yt-dlp failed (${String(downloadErr).slice(0, 240)}); continuing to TikTok fallback chain`);
-      try {
-        await downloadTikTokViaBrowser(url, fallbackPath);
-        const hasVideo = await hasVideoStream(fallbackPath);
-        const hasAudio = await hasAudioStream(fallbackPath);
-        console.log(`[SocialVideo][Download] initialBrowserFallback=${fallbackPath} video=${hasVideo} audio=${hasAudio}`);
-        if (hasVideo && hasAudio) rawPath = fallbackPath;
-      } catch (err) {
-        console.warn('[SocialVideo] initial TikTok browser fallback failed:', err);
-      }
+      console.warn(`[SocialVideo] TikTok yt-dlp failed (${String(downloadErr).slice(0, 240)}); retrying browser MP4 fallback`);
+      await downloadTikTokViaBrowser(url, fallbackPath);
     }
   }
 
@@ -815,32 +622,13 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
   if (!rawPath && /tiktok\.com/i.test(url)) {
     const fallbackPath = path.join(TMP_DIR, `${outBase}.browser.mp4`);
     console.warn('[SocialVideo] retrying TikTok browser fallback');
-    try {
-      await downloadTikTokViaBrowser(url, fallbackPath);
-      candidates.push(fallbackPath);
-      const hasVideo = await hasVideoStream(fallbackPath);
-      const hasAudio = await hasAudioStream(fallbackPath);
-      console.log(`[SocialVideo][Download] browserFallback=${fallbackPath} video=${hasVideo} audio=${hasAudio}`);
-      if (hasVideo && hasAudio) rawPath = fallbackPath;
-    } catch (err) {
-      console.warn('[SocialVideo] TikTok browser fallback failed:', err);
-    }
+    await downloadTikTokViaBrowser(url, fallbackPath);
+    candidates.push(fallbackPath);
+    const hasVideo = await hasVideoStream(fallbackPath);
+    const hasAudio = await hasAudioStream(fallbackPath);
+    console.log(`[SocialVideo][Download] browserFallback=${fallbackPath} video=${hasVideo} audio=${hasAudio}`);
+    if (hasVideo && hasAudio) rawPath = fallbackPath;
   }
-  if (!rawPath && isThreads) {
-    const snapSavePath = path.join(TMP_DIR, `${outBase}.snapsave.mp4`);
-    console.warn('[SocialVideo] retrying Threads SnapSave fallback');
-    try {
-      await downloadThreadsViaSnapSave(url, snapSavePath);
-      candidates.push(snapSavePath);
-      const hasVideo = await hasVideoStream(snapSavePath);
-      const hasAudio = await hasAudioStream(snapSavePath);
-      console.log(`[SocialVideo][Download] snapSaveThreads=${snapSavePath} video=${hasVideo} audio=${hasAudio}`);
-      if (hasVideo && hasAudio) rawPath = snapSavePath;
-    } catch (err) {
-      console.warn('[SocialVideo] SnapSave Threads fallback failed:', err);
-    }
-  }
-
   if (!rawPath && /tiktok\.com/i.test(url)) {
     const tikwmPath = path.join(TMP_DIR, `${outBase}.tikwm.mp4`);
     console.warn('[SocialVideo] retrying TikTok TikWM API fallback');
@@ -870,7 +658,6 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
   }
   meta ??= await fetchSocialVideoMeta(url);
   if (!meta.title && !meta.uploader) meta = { ...meta, title: url };
-  meta = { ...meta, sourceUrl: url };
 
   let outPath: string | undefined;
   try {
@@ -878,23 +665,16 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
     outPath = await normalizeForZalo(rawPath);
     console.log(`[SocialVideo][Normalize] OK out=${outPath} size=${statSync(outPath).size}`);
     if (!(await hasAudioStream(outPath))) throw new Error(`Normalized social video has no audio stream; refusing to upload silent video: ${outPath}`);
-    const durationSeconds = await probeDurationSeconds(rawPath);
     const paths = await splitForZalo(rawPath, outPath);
     console.log(`[SocialVideo][Split] OK parts=${paths.length} sizes=${paths.map(p => statSync(p).size).join(',')}`);
     for (const p of paths) {
       if (!(await hasAudioStream(p))) throw new Error(`Output social video segment has no audio stream; refusing to upload silent video: ${p}`);
     }
-    meta = {
-      ...meta,
-      durationSeconds,
-      sizeBytes: paths.reduce((sum, p) => sum + statSync(p).size, 0),
-    };
     return { paths, meta };
   } finally {
     for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
-
 
 
 
