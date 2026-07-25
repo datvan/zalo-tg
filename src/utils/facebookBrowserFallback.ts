@@ -180,26 +180,71 @@ function extractFacebookVideoId(url: string): string | undefined {
   return undefined;
 }
 
+export interface TargetFingerprint {
+  aspect: number;
+  duration?: number;
+  /** 64-bit average-hash of a decoded frame, as a 16-char hex string. */
+  frameHash?: string;
+  frameHashAtSeconds?: number;
+}
+
 /**
  * Facebook's Reels/Watch surface renders more than one <video> element at once (the target
  * plus the auto-preloaded "next in feed" item) and never populates a fetchable currentSrc/src
  * on either — so neither element identity nor its src can tell them apart directly. What IS
  * reliable: the FIRST <video> in DOM order is consistently the one for the URL we navigated
- * to, and its videoWidth/videoHeight (populated from preloaded metadata almost immediately,
- * well before any src is assigned) gives a stable aspect-ratio fingerprint for the target
- * content — which every other extraction path below can be checked against.
+ * to. Three independent signals from it, checked in increasing strictness, make a same-aspect
+ * coincidence between the target and a feed neighbor extremely unlikely to also collide on all
+ * three: aspect ratio (from videoWidth/videoHeight, available almost immediately), duration
+ * (available at the same time), and a perceptual hash of an actually-decoded frame (available
+ * once playback produces real pixel data) — the frame hash alone directly verifies visual
+ * content, not just metadata that two different clips could coincidentally share.
  */
-async function captureTargetAspect(page: import('puppeteer').Page): Promise<number | undefined> {
-  for (let i = 0; i < 15; i++) {
+async function captureTargetFingerprint(page: import('puppeteer').Page): Promise<TargetFingerprint | undefined> {
+  let aspect: number | undefined;
+  let duration: number | undefined;
+  for (let i = 0; i < 25 && aspect === undefined; i++) {
     const dims = await page.evaluate(() => {
       const v = document.querySelector('video') as HTMLVideoElement | null;
       if (v) { v.muted = true; void v.play().catch(() => undefined); }
-      return v && v.videoWidth ? { width: v.videoWidth, height: v.videoHeight } : undefined;
+      if (!v || !v.videoWidth) return undefined;
+      return { width: v.videoWidth, height: v.videoHeight, duration: Number.isFinite(v.duration) && v.duration > 0 ? v.duration : undefined };
     }).catch(() => undefined);
-    if (dims && dims.width > 0 && dims.height > 0) return dims.width / dims.height;
-    await new Promise(r => setTimeout(r, 700));
+    if (dims) { aspect = dims.width / dims.height; duration = dims.duration; }
+    else await new Promise(r => setTimeout(r, 700));
   }
-  return undefined;
+  if (aspect === undefined) return undefined;
+
+  // Metadata (dims/duration) loads before actual pixels are decoded. Poll a bit further,
+  // waiting for readyState to reach HAVE_CURRENT_DATA, so the hashed frame is real content.
+  let frameHash: string | undefined;
+  let frameHashAtSeconds: number | undefined;
+  for (let i = 0; i < 10 && !frameHash; i++) {
+    const captured = await page.evaluate(() => {
+      const v = document.querySelector('video') as HTMLVideoElement | null;
+      if (!v || v.readyState < 2 || !v.videoWidth) return undefined;
+      const SIZE = 8;
+      const canvas = document.createElement('canvas');
+      canvas.width = SIZE;
+      canvas.height = SIZE;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return undefined;
+      ctx.drawImage(v, 0, 0, SIZE, SIZE);
+      const { data } = ctx.getImageData(0, 0, SIZE, SIZE);
+      const gray: number[] = [];
+      for (let p = 0; p < data.length; p += 4) gray.push((data[p] + data[p + 1] + data[p + 2]) / 3);
+      return { gray, atSeconds: v.currentTime };
+    }).catch(() => undefined);
+    if (captured) {
+      const mean = captured.gray.reduce((s, x) => s + x, 0) / captured.gray.length;
+      frameHash = captured.gray.map(x => (x > mean ? '1' : '0')).join('');
+      frameHash = BigInt('0b' + frameHash).toString(16).padStart(16, '0');
+      frameHashAtSeconds = captured.atSeconds;
+    } else {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  return { aspect, duration, frameHash, frameHashAtSeconds };
 }
 
 async function probeAspect(filePath: string): Promise<number | undefined> {
@@ -221,8 +266,62 @@ async function probeAspect(filePath: string): Promise<number | undefined> {
   });
 }
 
+async function probeDuration(filePath: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    const p = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    p.stdout.on('data', d => { stdout += String(d); });
+    p.on('close', () => {
+      const d = Number(stdout.trim());
+      resolve(Number.isFinite(d) && d > 0 ? d : undefined);
+    });
+    p.on('error', () => resolve(undefined));
+  });
+}
+
+/** Same 8x8 average-hash algorithm as captureTargetFingerprint's browser-side canvas capture,
+ * computed instead via ffmpeg for a downloaded candidate file, at a matching timestamp. */
+async function computeFrameHash(filePath: string, atSeconds: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const p = spawn('ffmpeg', [
+      '-v', 'error',
+      '-ss', String(Math.max(0, atSeconds)),
+      '-i', filePath,
+      '-frames:v', '1',
+      '-vf', 'scale=8:8',
+      '-pix_fmt', 'gray',
+      '-f', 'rawvideo',
+      'pipe:1',
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks: Buffer[] = [];
+    p.stdout.on('data', d => chunks.push(d));
+    p.on('close', () => {
+      const buf = Buffer.concat(chunks);
+      if (buf.length < 64) { resolve(undefined); return; }
+      const mean = buf.reduce((s, x) => s + x, 0) / buf.length;
+      const bits = Array.from(buf.subarray(0, 64), x => (x > mean ? '1' : '0')).join('');
+      resolve(BigInt('0b' + bits).toString(16).padStart(16, '0'));
+    });
+    p.on('error', () => resolve(undefined));
+  });
+}
+
+function hammingDistanceHex(a: string, b: string): number {
+  const xor = BigInt('0x' + a) ^ BigInt('0x' + b);
+  return xor.toString(2).split('').filter(c => c === '1').length;
+}
+
 function aspectMatches(a: number, b: number, tolerance = 0.08): boolean {
   return Math.abs(a - b) / b <= tolerance;
+}
+
+function durationMatches(a: number, b: number, toleranceSeconds = 2, toleranceRatio = 0.1): boolean {
+  return Math.abs(a - b) <= Math.max(toleranceSeconds, b * toleranceRatio);
 }
 
 async function probeHasAudio(filePath: string): Promise<boolean> {
@@ -314,13 +413,20 @@ export async function downloadFacebookViaBrowser(url: string, outPath: string): 
 
     // The Reels surface renders the target video PLUS the next-in-feed item's <video> element
     // simultaneously, and neither ever gets a fetchable currentSrc/src — so this fingerprint
-    // (from the first, target, <video> element's decoded metadata) is the only reliable way
-    // left to tell "this download is actually the target" from "this is some other reel that
-    // happened to look biggest", which is what caused wrong videos to be sent previously.
-    const targetAspect = await captureTargetAspect(page);
-    console.warn(`[SocialVideo] Facebook browser fallback target aspect=${targetAspect?.toFixed(3) ?? 'unknown'}`);
+    // (from the first, target, <video> element's decoded metadata AND an actual decoded frame)
+    // is the only reliable way left to tell "this download is actually the target" from "this
+    // is some other reel that happened to look biggest", which is what caused wrong videos to
+    // be sent previously.
+    const fingerprint = await captureTargetFingerprint(page);
+    console.warn(`[SocialVideo] Facebook browser fallback target fingerprint aspect=${fingerprint?.aspect.toFixed(3) ?? 'unknown'} duration=${fingerprint?.duration?.toFixed(1) ?? 'unknown'} frameHash=${fingerprint?.frameHash ?? 'unavailable'}`);
+    if (!fingerprint) {
+      // Without ANY fingerprint there is no way to tell the target apart from a feed neighbor —
+      // accepting "whatever downloads" here is exactly the historical bug. Fail closed instead;
+      // the durable queue retries this job rather than risk posting unrelated content.
+      throw new Error('Facebook browser fallback could not establish a target video fingerprint (page loaded too slowly or the video element never reported metadata) — refusing to guess at which candidate is correct.');
+    }
 
-    const dash = extractDashStreams(await page.content().catch(() => ''), targetAspect);
+    const dash = extractDashStreams(await page.content().catch(() => ''), fingerprint.aspect);
     console.warn(`[SocialVideo] Facebook DASH manifest scan: video=${dash.video ? `found ${dash.video.width}x${dash.video.height}` : 'missing'} audio=${dash.audio ? `found bw=${dash.audio.bandwidth}` : 'missing'}`);
 
     const rankedVideoCandidates = [
@@ -340,10 +446,30 @@ export async function downloadFacebookViaBrowser(url: string, outPath: string): 
         await downloadWithFetch(candidateUrl, tmpVideoPath);
         const aspect = await probeAspect(tmpVideoPath);
         if (aspect === undefined) { try { unlinkSync(tmpVideoPath); } catch { /* ignore */ } continue; }
-        if (targetAspect !== undefined && !aspectMatches(aspect, targetAspect)) {
-          console.warn(`[SocialVideo] Facebook browser fallback: discarding candidate aspect=${aspect.toFixed(3)} vs target=${targetAspect.toFixed(3)} url=${candidateUrl.slice(0, 100)}`);
+        if (fingerprint?.aspect !== undefined && !aspectMatches(aspect, fingerprint.aspect)) {
+          console.warn(`[SocialVideo] Facebook browser fallback: discarding candidate — aspect ${aspect.toFixed(3)} vs target ${fingerprint.aspect.toFixed(3)}, url=${candidateUrl.slice(0, 100)}`);
           try { unlinkSync(tmpVideoPath); } catch { /* ignore */ }
           continue;
+        }
+        if (fingerprint?.duration !== undefined) {
+          const duration = await probeDuration(tmpVideoPath);
+          if (duration !== undefined && !durationMatches(duration, fingerprint.duration)) {
+            console.warn(`[SocialVideo] Facebook browser fallback: discarding candidate — duration ${duration.toFixed(1)}s vs target ${fingerprint.duration.toFixed(1)}s, url=${candidateUrl.slice(0, 100)}`);
+            try { unlinkSync(tmpVideoPath); } catch { /* ignore */ }
+            continue;
+          }
+        }
+        if (fingerprint?.frameHash !== undefined && fingerprint.frameHashAtSeconds !== undefined) {
+          const candidateHash = await computeFrameHash(tmpVideoPath, fingerprint.frameHashAtSeconds);
+          if (candidateHash !== undefined) {
+            const distance = hammingDistanceHex(candidateHash, fingerprint.frameHash);
+            if (distance > 12) {
+              console.warn(`[SocialVideo] Facebook browser fallback: discarding candidate — frame hash distance=${distance}/64 (aspect+duration matched but visual content did not), url=${candidateUrl.slice(0, 100)}`);
+              try { unlinkSync(tmpVideoPath); } catch { /* ignore */ }
+              continue;
+            }
+            console.warn(`[SocialVideo] Facebook browser fallback: candidate frame hash distance=${distance}/64 — accepting`);
+          }
         }
         acceptedVideoPath = tmpVideoPath;
         break;
@@ -358,7 +484,7 @@ export async function downloadFacebookViaBrowser(url: string, outPath: string): 
         bodyHint: document.body?.innerText?.slice(0, 240),
       })).catch(() => undefined);
       console.warn(`[SocialVideo] Facebook browser fallback no-matching-video state=${JSON.stringify(pageState)} seenTop=${JSON.stringify(seenTop)}`);
-      throw new Error('Facebook browser fallback could not find a video response matching the target (checked DOM src, DASH manifest, and network traffic, verified by aspect ratio). Refusing to upload unrelated content; see PM2 logs for pageState/seenTop.');
+      throw new Error('Facebook browser fallback could not find a video response matching the target (checked DOM src, DASH manifest, and network traffic, verified by aspect ratio + duration + frame hash). Refusing to upload unrelated content; see PM2 logs for pageState/seenTop.');
     }
     console.warn(`[SocialVideo] Facebook browser fallback accepted video candidate; checked ${rankedVideoCandidates.length} candidate(s)`);
 
