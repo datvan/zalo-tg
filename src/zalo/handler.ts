@@ -10,11 +10,14 @@ import { markHealth } from '../health.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, getVideoInfo } from '../utils/media.js';
-import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, prepareTelegramVideoPaths, formatSocialVideoCaption } from '../utils/socialVideo.js';
-import { beginSocialVideoJob, buildSocialVideoJobPartManifest, completeSocialVideoJob, createDurableSocialVideoJob, failSocialVideoJob, hasSocialVideoJobPartManifestMismatch, listReplayableSocialVideoJobs, markSocialVideoJobPartDone, setSocialVideoJobPartManifest, type DurableSocialVideoJob } from '../utils/durableSocialVideoQueue.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, prepareTelegramVideoPaths, formatSocialVideoCaption, createSocialVideoThumbnail, withUploadTimeout } from '../utils/socialVideo.js';
+import { beginSocialVideoJob, buildSocialVideoJobPartManifest, completeSocialVideoJob, createDurableSocialVideoJob, failSocialVideoJob, hasSocialVideoJobPartManifestMismatch, listReplayableSocialVideoJobs, markSocialVideoJobPartDone, markSocialVideoJobSourcePartDone, setSocialVideoJobPartManifest, socialVideoJobPartClientId, type DurableSocialVideoJob } from '../utils/durableSocialVideoQueue.js';
+import { consumeSelfVideoMessage, consumeSelfVideoUrl, rememberSelfVideoCaption, rememberSelfVideoMessage, rememberSelfVideoUrl } from '../utils/selfVideoCaption.js';
+import { sendZaloVideoWithClientId } from '../utils/zaloSendVideoWithClientId.js';
 import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
 import { resolveTopicDisplayName, type TopicProfile } from './topic.js';
+import { claimSocialVideoRepost, deleteSocialVideoRepostReference, getSocialVideoRepostReference, releaseSocialVideoRepost, saveSocialVideoRepostReference } from '../utils/socialVideoRepostIndex.js';
 
 // ── Bank card HTML parser ────────────────────────────────────────────────────
 interface BankCardInfo {
@@ -295,10 +298,31 @@ export function setupZaloHandler(api: ZaloAPI): void {
     sendOptions: { message_thread_id: number; parse_mode: 'HTML'; caption?: string },
     saveMapping?: (sent: { message_id: number }) => void,
   ): Promise<void> => {
+    const scope = `${job.topicId}:${job.zaloId}:${job.threadType}`;
+    const cached = getSocialVideoRepostReference('telegram', scope, job.canonicalKey);
+    if (cached) {
+      try {
+        for (const part of cached.parts) await tgBot.telegram.sendMessage(config.telegram.groupId, part.referenceUrl, sendOptions);
+        completeSocialVideoJob(job.id);
+        console.log(`[Zalo→TG][SocialVideo] Cache hit key=${job.canonicalKey} parts=${cached.parts.length}`);
+        return;
+      } catch (err) {
+        deleteSocialVideoRepostReference('telegram', scope, job.canonicalKey);
+        console.warn(`[Zalo→TG][SocialVideo] Cached reference failed key=${job.canonicalKey}; reposting`, err);
+      }
+    }
+    if (!claimSocialVideoRepost('telegram', scope, job.canonicalKey)) {
+      console.log(`[Zalo→TG][SocialVideo] Duplicate already processing key=${job.canonicalKey}`);
+      return;
+    }
     let started = beginSocialVideoJob(job.id);
-    if (!started || started.status === 'done' || started.status === 'failed') return;
+    if (!started || started.status === 'done' || started.status === 'failed') {
+      releaseSocialVideoRepost('telegram', scope, job.canonicalKey);
+      return;
+    }
     const localPaths: string[] = [];
     const downloadedPaths: string[] = [];
+    const referenceParts = new Map<number, { index: number; referenceUrl: string; messageId?: number }>(Object.entries(started.sentParts ?? {}).flatMap(([index, part]) => part.referenceUrl ? [[Number(index), { index: Number(index), referenceUrl: part.referenceUrl, messageId: part.result && typeof part.result === 'object' && part.result !== null && 'message_id' in part.result ? Number((part.result as { message_id?: unknown }).message_id) : undefined }]] : []));
     try {
       console.log(`[Zalo→TG][SocialVideo] Downloading ${started.label}: ${started.url}`);
       const downloaded = await downloadSocialVideo(started.url);
@@ -309,26 +333,75 @@ export function setupZaloHandler(api: ZaloAPI): void {
       if (hasSocialVideoJobPartManifestMismatch(started, currentManifest)) {
         console.warn(`[Zalo→TG][SocialVideo] Download changed for ${started.id}; resetting part progress`);
         setSocialVideoJobPartManifest(started.id, currentManifest, true);
-        started = { ...started, partManifest: currentManifest, sentParts: undefined };
+        started = { ...started, partManifest: currentManifest, sentParts: undefined, sourceSentParts: undefined };
+        referenceParts.clear();
       } else {
         setSocialVideoJobPartManifest(started.id, currentManifest);
       }
       for (let i = 0; i < localPaths.length; i++) {
-        if (started.sentParts?.[String(i)]) continue;
+        const partKey = String(i);
         const partPath = localPaths[i]!;
         const videoInfo = await getVideoInfo(partPath).catch(() => ({ durationMs: 30_000, width: 720, height: 1280 }));
-        const partCaption = escapeHtml(formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined));
-        const sent = await tgBot.telegram.sendVideo(
-          config.telegram.groupId,
-          { source: createReadStream(partPath) },
-          { ...sendOptions, caption: partCaption, duration: Math.round(videoInfo.durationMs / 1000), width: videoInfo.width, height: videoInfo.height },
-        );
-        saveMapping?.(sent);
-        markSocialVideoJobPartDone(started.id, i, String(sent.message_id), sent);
-        console.log(`[Zalo→TG][SocialVideo] Sent part ${i + 1}/${localPaths.length} msgId=${sent.message_id}`);
+        const partCaption = formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined);
+
+        if (!started.sentParts?.[partKey]) {
+          const sent = await tgBot.telegram.sendVideo(
+            config.telegram.groupId,
+            { source: createReadStream(partPath) },
+            { ...sendOptions, caption: escapeHtml(partCaption), duration: Math.round(videoInfo.durationMs / 1000), width: videoInfo.width, height: videoInfo.height },
+          );
+          const referenceUrl = `https://t.me/c/${String(config.telegram.groupId).replace(/^-100/, '')}/${sent.message_id}`;
+          saveMapping?.(sent);
+          referenceParts.set(i, { index: i, referenceUrl, messageId: sent.message_id });
+          markSocialVideoJobPartDone(started.id, i, String(sent.message_id), sent, referenceUrl);
+          console.log(`[Zalo→TG][SocialVideo] Sent part ${i + 1}/${localPaths.length} msgId=${sent.message_id}`);
+        }
+
+        if (started.mirrorSource === true && !started.sourceSentParts?.[partKey]) {
+          const uploaded = await withUploadTimeout(api.uploadAttachment(partPath, started.zaloId, started.threadType) as Promise<Array<{
+            fileUrl?: string;
+            normalUrl?: string;
+            hdUrl?: string;
+          }>>, `[Zalo→Zalo][SocialVideo] upload ${partKey}`);
+          const videoUrl = uploaded[0]?.fileUrl ?? uploaded[0]?.normalUrl ?? uploaded[0]?.hdUrl;
+          let thumbnailPath: string | undefined;
+          let thumbnailUrl: string | undefined;
+          try {
+            thumbnailPath = await createSocialVideoThumbnail(partPath);
+            const thumbnailUploaded = await withUploadTimeout(api.uploadAttachment(thumbnailPath, started.zaloId, started.threadType) as Promise<Array<{
+              fileUrl?: string;
+              normalUrl?: string;
+              hdUrl?: string;
+              thumbUrl?: string;
+            }>>, `[Zalo→Zalo][SocialVideo] upload thumbnail ${partKey}`);
+            thumbnailUrl = thumbnailUploaded[0]?.thumbUrl ?? thumbnailUploaded[0]?.normalUrl ?? thumbnailUploaded[0]?.hdUrl ?? thumbnailUploaded[0]?.fileUrl;
+          } finally {
+            if (thumbnailPath) await cleanTemp(thumbnailPath);
+          }
+          if (!videoUrl || !thumbnailUrl) throw new Error('Missing videoUrl/thumbUrl from uploadAttachment');
+          rememberSelfVideoUrl(videoUrl);
+          rememberSelfVideoUrl(started.url);
+          const sendResult = await sendZaloVideoWithClientId(api, {
+            msg: partCaption,
+            videoUrl,
+            thumbnailUrl,
+            duration: videoInfo.durationMs,
+            width: videoInfo.width,
+            height: videoInfo.height,
+          }, started.zaloId, started.threadType as ThreadType, socialVideoJobPartClientId(started.id, i));
+          rememberSelfVideoMessage(sendResult);
+          rememberSelfVideoCaption(sendResult, partCaption);
+          if (partCaption.trim()) sentMsgStore.markPendingSelf(started.zaloId, started.threadType as 0 | 1, partCaption);
+          markSocialVideoJobSourcePartDone(started.id, i, socialVideoJobPartClientId(started.id, i), sendResult, videoUrl);
+          console.log(`[Zalo→Zalo][SocialVideo] Sent source part ${i + 1}/${localPaths.length} result=${JSON.stringify(sendResult ?? {})}`);
+        }
       }
-      completeSocialVideoJob(started.id);
+      const completed = completeSocialVideoJob(started.id);
+      if (completed?.status === 'done' && referenceParts.size === localPaths.length) {
+        saveSocialVideoRepostReference({ canonicalKey: started.canonicalKey, sourceUrl: started.url, target: 'telegram', scope, parts: [...referenceParts.values()] });
+      }
     } finally {
+      releaseSocialVideoRepost('telegram', scope, job.canonicalKey);
       for (const p of new Set([...downloadedPaths, ...localPaths])) await cleanTemp(p);
     }
   };
@@ -367,8 +440,8 @@ export function setupZaloHandler(api: ZaloAPI): void {
     try {
       if (msg.isSelf) {
         const ownMsgIds = [msg.data?.msgId, msg.data?.realMsgId]
-          .filter((id): id is string => typeof id === 'string' && id.length > 0);
-        if (ownMsgIds.some(id => sentMsgStore.getByZaloMsgId(id) !== undefined)) return;
+          .filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== '0');
+        if (ownMsgIds.some(id => sentMsgStore.getByZaloMsgId(id) !== undefined || consumeSelfVideoMessage(id))) return;
       }
 
       const zaloId     = msg.threadId;
@@ -462,6 +535,10 @@ export function setupZaloHandler(api: ZaloAPI): void {
         if (!rawUrl || topicId === undefined) return;
         const videoUrl = extractSocialVideoUrl(rawUrl);
         if (!videoUrl) return;
+        if (msg.isSelf && consumeSelfVideoUrl(videoUrl)) {
+          console.log(`[Zalo→TG][SocialVideo] Skipped self repost echo source=${source} msgId=${msg.data.msgId}`);
+          return;
+        }
         const job = createDurableSocialVideoJob({
           source: 'zalo',
           target: 'telegram',
@@ -471,6 +548,7 @@ export function setupZaloHandler(api: ZaloAPI): void {
           url: videoUrl,
           zaloId,
           threadType: type,
+          mirrorSource: true,
         });
         enqueueDurableZaloSocialVideoJob(job, tgOpts, saveTgMapping);
       };
@@ -479,9 +557,16 @@ export function setupZaloHandler(api: ZaloAPI): void {
       if (msgType === ZALO_MSG_TYPES.TEXT || (text !== null)) {
         const body = text ?? (typeof msg.data.content === 'string' ? msg.data.content : '');
         if (!body.trim()) return;
-        if (msg.isSelf && sentMsgStore.consumePendingSelf(zaloId, type, body)) {
-          console.log('[Zalo?TG] Skipped TG-origin self echo msgId=' + msg.data.msgId);
-          return;
+        if (msg.isSelf) {
+          const selfVideoUrl = extractSocialVideoUrl(body);
+          if (selfVideoUrl && consumeSelfVideoUrl(selfVideoUrl)) {
+            console.log('[Zalo→TG] Skipped TG-origin video caption echo msgId=' + msg.data.msgId);
+            return;
+          }
+          if (sentMsgStore.consumePendingSelf(zaloId, type, body)) {
+            console.log('[Zalo→TG] Skipped TG-origin self echo msgId=' + msg.data.msgId);
+            return;
+          }
         }
         const mentions = msg.data.mentions;
         const bodyHtml = mentions?.length
@@ -668,6 +753,11 @@ ${escapeHtml(photoCaption)}`
       if (msgType === ZALO_MSG_TYPES.VIDEO) {
         const url = pickMediaUrl(media);
         if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', shortContent(msg.data.content)); return; }
+        if (msg.isSelf && consumeSelfVideoUrl(url)) {
+          console.log(`[Zalo→TG] Skipped TG-origin native video echo msgId=${msg.data.msgId}`);
+          return;
+        }
+
         const downloadedPath = await downloadToTemp(url, `video_${Date.now()}.mp4`);
         let localPaths: string[] = [];
         try {

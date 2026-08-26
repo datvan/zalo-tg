@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node scripts/unit-watchdog-zalo-stale.mjs && node scripts/unit-zalo-health-wiring.mjs && node scripts/unit-durable-social-video-queue.mjs && node scripts/unit-social-video-upload-retry.mjs && node scripts/unit-encoding-guard.mjs && node scripts/unit-sender-name.mjs && node scripts/unit-topic-name.mjs && node scripts/unit-zalo-send-video-client-id.mjs && node scripts/unit-zalo-social-video-metadata.mjs && node scripts/unit-social-video-regression.mjs && node scripts/unit-telegram-social-video-parts.mjs && node scripts/unit-facebook-browser-session.mjs"
+  "test": "node scripts/unit-watchdog-zalo-stale.mjs && node scripts/unit-zalo-health-wiring.mjs && node scripts/unit-durable-social-video-queue.mjs && node scripts/unit-social-video-upload-retry.mjs && node scripts/unit-encoding-guard.mjs && node scripts/unit-sender-name.mjs && node scripts/unit-topic-name.mjs && node scripts/unit-zalo-send-video-client-id.mjs && node scripts/unit-zalo-social-video-metadata.mjs && node scripts/unit-social-video-regression.mjs && node scripts/unit-social-video-repost-index.mjs && node scripts/unit-telegram-social-video-parts.mjs && node scripts/unit-facebook-browser-session.mjs"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",

@@ -24,10 +24,13 @@ export interface DurableSocialVideoJob {
   updatedAt: string;
   lastError?: string;
   doneAt?: string;
+  mirrorSource?: boolean;
+  telegramPartCount?: number;
+  sourcePartCount?: number;
+  sentParts?: Record<string, { clientId: string; result?: unknown; referenceUrl?: string; sentAt: string }>;
+  sourceSentParts?: Record<string, { clientId: string; result?: unknown; referenceUrl?: string; sentAt: string }>;
   partManifest?: Array<{ index: number; sizeBytes: number; sha256?: string }>;
-  sentParts?: Record<string, { clientId: string; result?: unknown; sentAt: string }>;
 }
-
 export interface CreateDurableSocialVideoJobInput {
   source: 'telegram' | 'zalo';
   target: 'telegram' | 'zalo';
@@ -37,6 +40,7 @@ export interface CreateDurableSocialVideoJobInput {
   url: string;
   zaloId: string;
   threadType: number;
+  mirrorSource?: boolean;
 }
 
 const MAX_ATTEMPTS = Number(process.env.SOCIAL_VIDEO_DURABLE_MAX_ATTEMPTS || 5);
@@ -44,17 +48,9 @@ const QUEUE_DIR = process.env.SOCIAL_VIDEO_QUEUE_DIR
   ? path.resolve(process.env.SOCIAL_VIDEO_QUEUE_DIR)
   : path.resolve(process.cwd(), process.env.DATA_DIR ?? './data', 'social-video-queue');
 
-function ensureQueueDir(): void {
-  mkdirSync(QUEUE_DIR, { recursive: true });
-}
-
-function hash(value: string): string {
-  return createHash('sha1').update(value).digest('hex').slice(0, 16);
-}
-
-function jobPath(id: string): string {
-  return path.join(QUEUE_DIR, `${id}.json`);
-}
+function ensureQueueDir(): void { mkdirSync(QUEUE_DIR, { recursive: true }); }
+function hash(value: string): string { return createHash('sha1').update(value).digest('hex').slice(0, 16); }
+function jobPath(id: string): string { return path.join(QUEUE_DIR, `${id}.json`); }
 
 function writeJob(job: DurableSocialVideoJob): void {
   ensureQueueDir();
@@ -78,8 +74,7 @@ function readJobFile(filePath: string): DurableSocialVideoJob | undefined {
 }
 
 export function socialVideoJobId(input: Pick<CreateDurableSocialVideoJobInput, 'source' | 'target' | 'sourceMessageId' | 'topicId' | 'url'>): string {
-  const key = canonicalSocialVideoKey(input.url);
-  return `${input.source}-${input.target}-${input.topicId}-${String(input.sourceMessageId)}-${hash(key)}`;
+  return `${input.source}-${input.target}-${input.topicId}-${String(input.sourceMessageId)}-${hash(canonicalSocialVideoKey(input.url))}`;
 }
 
 export function socialVideoJobPartClientId(jobId: string, partIndex: number): string {
@@ -89,8 +84,7 @@ export function socialVideoJobPartClientId(jobId: string, partIndex: number): st
 
 export function getSocialVideoJob(id: string): DurableSocialVideoJob | undefined {
   const filePath = jobPath(id);
-  if (!existsSync(filePath)) return undefined;
-  return readJobFile(filePath);
+  return existsSync(filePath) ? readJobFile(filePath) : undefined;
 }
 
 export function createDurableSocialVideoJob(input: CreateDurableSocialVideoJobInput): DurableSocialVideoJob {
@@ -116,6 +110,7 @@ export function createDurableSocialVideoJob(input: CreateDurableSocialVideoJobIn
     maxAttempts: MAX_ATTEMPTS,
     createdAt: now,
     updatedAt: now,
+    mirrorSource: input.mirrorSource ?? false,
   };
   writeJob(job);
   return job;
@@ -125,22 +120,11 @@ export function beginSocialVideoJob(id: string): DurableSocialVideoJob | undefin
   const job = getSocialVideoJob(id);
   if (!job || job.status === 'done' || job.status === 'failed') return job;
   if (job.attempts >= job.maxAttempts) {
-    const failed: DurableSocialVideoJob = {
-      ...job,
-      status: 'failed',
-      updatedAt: new Date().toISOString(),
-      lastError: job.lastError ?? `Maximum attempts exceeded (${job.maxAttempts})`,
-    };
+    const failed = { ...job, status: 'failed' as const, updatedAt: new Date().toISOString(), lastError: job.lastError ?? `Maximum attempts exceeded (${job.maxAttempts})` };
     writeJob(failed);
     return failed;
   }
-  const next: DurableSocialVideoJob = {
-    ...job,
-    status: 'running',
-    attempts: job.attempts + 1,
-    updatedAt: new Date().toISOString(),
-    lastError: undefined,
-  };
+  const next = { ...job, status: 'running' as const, attempts: job.attempts + 1, updatedAt: new Date().toISOString(), lastError: undefined };
   writeJob(next);
   return next;
 }
@@ -150,62 +134,62 @@ export function completeSocialVideoJob(id: string): DurableSocialVideoJob | unde
   if (!job) return undefined;
   if (job.partManifest?.length) {
     const sentParts = job.sentParts ?? {};
-    const complete = job.partManifest.every(part => Boolean(sentParts[String(part.index)]));
+    const sourceSentParts = job.sourceSentParts ?? {};
+    const complete = job.mirrorSource === true
+      ? (job.telegramPartCount === undefined || Object.keys(sentParts).length >= job.telegramPartCount)
+        && (job.sourcePartCount === undefined || Object.keys(sourceSentParts).length >= job.sourcePartCount)
+      : job.partManifest.every(part => Boolean(sentParts[String(part.index)]));
     if (!complete) return job;
   }
   const now = new Date().toISOString();
-  const next: DurableSocialVideoJob = {
-    ...job,
-    status: 'done',
-    updatedAt: now,
-    doneAt: now,
-    lastError: undefined,
-  };
+  const next = { ...job, status: 'done' as const, updatedAt: now, doneAt: now, lastError: undefined };
   writeJob(next);
   return next;
-
 }
 
-export function markSocialVideoJobPartDone(
-  id: string,
-  partIndex: number,
-  clientId: string,
-  result: unknown,
-): DurableSocialVideoJob | undefined {
+export function markSocialVideoJobPartDone(id: string, partIndex: number, clientId: string, result: unknown, referenceUrl?: string): DurableSocialVideoJob | undefined {
   const job = getSocialVideoJob(id);
   if (!job) return undefined;
   if (job.sentParts?.[String(partIndex)]) return job;
-  const next: DurableSocialVideoJob = {
+  const next = {
     ...job,
-    sentParts: {
-      ...(job.sentParts ?? {}),
-      [String(partIndex)]: { clientId, result, sentAt: new Date().toISOString() },
-    },
-    updatedAt: new Date().toISOString(),
-  };
-  writeJob(next);
-  return next;
-}
-export function setSocialVideoJobPartManifest(
-  id: string,
-  partManifest: Array<{ index: number; sizeBytes: number; sha256?: string }>,
-  resetSentParts = false,
-): DurableSocialVideoJob | undefined {
-  const job = getSocialVideoJob(id);
-  if (!job) return undefined;
-  const next: DurableSocialVideoJob = {
-    ...job,
-    partManifest,
-    ...(resetSentParts ? { sentParts: undefined } : {}),
+    sentParts: { ...(job.sentParts ?? {}), [String(partIndex)]: { clientId, result, ...(referenceUrl ? { referenceUrl } : {}), sentAt: new Date().toISOString() } },
     updatedAt: new Date().toISOString(),
   };
   writeJob(next);
   return next;
 }
 
-export async function buildSocialVideoJobPartManifest(
-  paths: string[],
-): Promise<Array<{ index: number; sizeBytes: number; sha256: string }>> {
+export function markSocialVideoJobSourcePartDone(id: string, partIndex: number, clientId: string, result: unknown, referenceUrl?: string): DurableSocialVideoJob | undefined {
+  const job = getSocialVideoJob(id);
+  if (!job) return undefined;
+  if (job.sourceSentParts?.[String(partIndex)]) return job;
+  const next = {
+    ...job,
+    sourceSentParts: { ...(job.sourceSentParts ?? {}), [String(partIndex)]: { clientId, result, ...(referenceUrl ? { referenceUrl } : {}), sentAt: new Date().toISOString() } },
+    updatedAt: new Date().toISOString(),
+  };
+  writeJob(next);
+  return next;
+}
+
+export function setSocialVideoJobPartManifest(id: string, partManifest: Array<{ index: number; sizeBytes: number; sha256?: string }>, resetSentParts = false): DurableSocialVideoJob | undefined {
+  const job = getSocialVideoJob(id);
+  if (!job) return undefined;
+  const next = { ...job, partManifest, ...(resetSentParts ? { sentParts: undefined, sourceSentParts: undefined } : {}), updatedAt: new Date().toISOString() };
+  writeJob(next);
+  return next;
+}
+
+export function setSocialVideoJobPartCounts(id: string, telegramPartCount: number, sourcePartCount: number): DurableSocialVideoJob | undefined {
+  const job = getSocialVideoJob(id);
+  if (!job) return undefined;
+  const next = { ...job, telegramPartCount, sourcePartCount, updatedAt: new Date().toISOString() };
+  writeJob(next);
+  return next;
+}
+
+export async function buildSocialVideoJobPartManifest(paths: string[]): Promise<Array<{ index: number; sizeBytes: number; sha256: string }>> {
   return Promise.all(paths.map(async (filePath, index) => {
     const sha256 = await new Promise<string>((resolve, reject) => {
       const hashStream = createHash('sha256');
@@ -218,10 +202,7 @@ export async function buildSocialVideoJobPartManifest(
   }));
 }
 
-export function hasSocialVideoJobPartManifestMismatch(
-  job: DurableSocialVideoJob,
-  current: Array<{ index: number; sizeBytes: number; sha256?: string }>,
-): boolean {
+export function hasSocialVideoJobPartManifestMismatch(job: DurableSocialVideoJob, current: Array<{ index: number; sizeBytes: number; sha256?: string }>): boolean {
   const previous = job.partManifest;
   if (!previous?.length) return false;
   if (current.length !== previous.length) return true;
@@ -234,13 +215,7 @@ export function hasSocialVideoJobPartManifestMismatch(
 export function failSocialVideoJob(id: string, err: unknown): DurableSocialVideoJob | undefined {
   const job = getSocialVideoJob(id);
   if (!job) return undefined;
-  const nextStatus: DurableSocialVideoJobStatus = job.attempts >= job.maxAttempts ? 'failed' : 'pending';
-  const next: DurableSocialVideoJob = {
-    ...job,
-    status: nextStatus,
-    updatedAt: new Date().toISOString(),
-    lastError: err instanceof Error ? err.message : String(err),
-  };
+  const next = { ...job, status: (job.attempts >= job.maxAttempts ? 'failed' : 'pending') as DurableSocialVideoJobStatus, updatedAt: new Date().toISOString(), lastError: err instanceof Error ? err.message : String(err) };
   writeJob(next);
   return next;
 }

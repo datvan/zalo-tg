@@ -15,8 +15,8 @@ const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/i;
 const SOCIAL_VIDEO_RE_GLOBAL = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/ig;
 const UNSUPPORTED_SOCIAL_POST_RE = /https?:\/\/(?:www\.|m\.)?facebook\.com\/share\/(?:p|post)\/\S+/i;
-const MAX_BYTES = 50 * 1024 * 1024;
-const TARGET_SEGMENT_BYTES = 45 * 1024 * 1024;
+const ZALO_MAX_BYTES = Number(process.env.ZALO_VIDEO_MAX_BYTES || 90 * 1024 * 1024);
+const ZALO_TARGET_SEGMENT_BYTES = Number(process.env.ZALO_VIDEO_TARGET_BYTES || 85 * 1024 * 1024);
 const TELEGRAM_MAX_BYTES = Number(process.env.TELEGRAM_VIDEO_MAX_BYTES || 50 * 1024 * 1024);
 const TELEGRAM_TARGET_SEGMENT_BYTES = Number(process.env.TELEGRAM_VIDEO_TARGET_BYTES || 45 * 1024 * 1024);
 
@@ -25,20 +25,28 @@ export function telegramPartCountForSize(size: number): number {
 }
 
 export function zaloPartCountForSize(size: number): number {
-  return size <= MAX_BYTES ? 1 : Math.ceil(size / TARGET_SEGMENT_BYTES);
+  return size <= ZALO_MAX_BYTES ? 1 : Math.ceil(size / ZALO_TARGET_SEGMENT_BYTES);
 }
 
 export async function prepareTelegramVideoPaths(paths: string[]): Promise<string[]> {
+  return prepareVideoPaths(paths, TELEGRAM_MAX_BYTES, TELEGRAM_TARGET_SEGMENT_BYTES, 'Telegram');
+}
+
+export async function prepareZaloVideoPaths(paths: string[]): Promise<string[]> {
+  return prepareVideoPaths(paths, ZALO_MAX_BYTES, ZALO_TARGET_SEGMENT_BYTES, 'Zalo');
+}
+
+async function prepareVideoPaths(paths: string[], maxBytes: number, targetBytes: number, label: string): Promise<string[]> {
   const prepared: string[] = [];
   try {
     for (const inputPath of paths) {
       const size = statSync(inputPath).size;
-      if (size <= TELEGRAM_MAX_BYTES) {
+      if (size <= maxBytes) {
         prepared.push(inputPath);
         continue;
       }
       const duration = await probeDurationSeconds(inputPath);
-      const parts = await splitVideoBySize(inputPath, duration, telegramPartCountForSize(size), TELEGRAM_MAX_BYTES, 'Telegram');
+      const parts = await splitVideoBySize(inputPath, duration, Math.ceil(size / targetBytes), maxBytes, label);
       prepared.push(...parts);
     }
     return prepared;
@@ -518,11 +526,11 @@ async function splitVideoBySize(
 
 async function splitForZalo(inputPath: string, firstNormalizedPath: string): Promise<string[]> {
   const firstSize = statSync(firstNormalizedPath).size;
-  if (firstSize <= MAX_BYTES) return [firstNormalizedPath];
+  if (firstSize <= ZALO_MAX_BYTES) return [firstNormalizedPath];
 
   await cleanTemp(firstNormalizedPath);
   const duration = await probeDurationSeconds(inputPath);
-  const parts = await splitVideoBySize(inputPath, duration, zaloPartCountForSize(firstSize), MAX_BYTES, 'Zalo');
+  const parts = await splitVideoBySize(inputPath, duration, zaloPartCountForSize(firstSize), ZALO_MAX_BYTES, 'Zalo');
   console.log(`[SocialVideo] Split ${Math.round(duration)}s video into ${parts.length} part(s)`);
   return parts;
 }
@@ -947,15 +955,11 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
     console.log(`[SocialVideo][Normalize] OK out=${outPath} size=${statSync(outPath).size}`);
     if (!allowSilent && !(await hasAudioStream(outPath))) throw new Error(`Normalized social video has no audio stream; refusing to upload silent video: ${outPath}`);
     const durationSeconds = await probeDurationSeconds(rawPath);
-    const paths = await splitForZalo(rawPath, outPath);
-    console.log(`[SocialVideo][Split] OK parts=${paths.length} sizes=${paths.map(p => statSync(p).size).join(',')}`);
-    for (const p of paths) {
-      if (!allowSilent && !(await hasAudioStream(p))) throw new Error(`Output social video segment has no audio stream; refusing to upload silent video: ${p}`);
-    }
+    const paths = [outPath];
     meta = {
       ...meta,
       durationSeconds,
-      sizeBytes: paths.reduce((sum, p) => sum + statSync(p).size, 0),
+      sizeBytes: statSync(outPath).size,
     };
     return { paths, meta };
   } finally {

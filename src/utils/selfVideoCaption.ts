@@ -5,9 +5,36 @@ const pendingSelfVideoCaptions = new Map<string, string>();
 const pendingSelfVideoFallbacks = new Map<string, { localPath: string; caption: string; timer: NodeJS.Timeout }>();
 
 function msgIdFromResult(result: unknown): string | undefined {
-  const msgId = (result as { msgId?: unknown })?.msgId;
+  const value = result as { msgId?: unknown; message?: { msgId?: unknown } };
+  const msgId = value?.msgId ?? value?.message?.msgId;
   return msgId == null ? undefined : String(msgId);
 }
+
+const pendingSelfVideoMessages = new Set<string>();
+const pendingSelfVideoUrls = new Set<string>();
+
+function normalizeSelfVideoUrl(url: string): string {
+  return url.trim().replace(/[\])}>.,!?'"]+$/, '').toLowerCase();
+}
+
+export function rememberSelfVideoMessage(result: unknown): void {
+  const msgId = msgIdFromResult(result);
+  if (msgId) pendingSelfVideoMessages.add(msgId);
+}
+
+export function consumeSelfVideoMessage(msgId: string): boolean {
+  return pendingSelfVideoMessages.delete(msgId);
+}
+
+export function rememberSelfVideoUrl(url: string): void {
+  const normalized = normalizeSelfVideoUrl(url);
+  if (normalized) pendingSelfVideoUrls.add(normalized);
+}
+
+export function consumeSelfVideoUrl(url: string): boolean {
+  return pendingSelfVideoUrls.delete(normalizeSelfVideoUrl(url));
+}
+
 
 function removeFileQuietly(localPath: string): void {
   try {
