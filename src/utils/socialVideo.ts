@@ -948,7 +948,3 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
     for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
-
-
-
-

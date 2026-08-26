@@ -1554,11 +1554,3 @@ export function setupTelegramHandler(
 }
 
 // Called by setupTelegramHandler, but defined after so we can reference tgBot directly.
-
-
-
-
-
-
-
-
