@@ -31,16 +31,15 @@ function pipBinPath(): string {
 }
 
 function runCapture(command: string, args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  let resolveResult!: (result: { code: number | null; stdout: string; stderr: string }) => void;
-  const promise = new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => { resolveResult = resolve; });
+  const { promise, resolve } = Promise.withResolvers<{ code: number | null; stdout: string; stderr: string }>();
   const p = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   const timer = setTimeout(() => { p.kill(); }, timeoutMs);
   p.stdout.on('data', d => { stdout += String(d); });
   p.stderr.on('data', d => { stderr += String(d); });
-  p.on('close', code => { clearTimeout(timer); resolveResult({ code, stdout, stderr }); });
-  p.on('error', err => { clearTimeout(timer); resolveResult({ code: null, stdout, stderr: String(err) }); });
+  p.on('close', code => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+  p.on('error', err => { clearTimeout(timer); resolve({ code: null, stdout, stderr: String(err) }); });
   return promise;
 }
 

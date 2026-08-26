@@ -1,41 +1,91 @@
-import { ThreadType, FriendEventType } from 'zca-js';
-import type { TelegramEmoji } from 'telegraf/types';
+import { ThreadType } from 'zca-js';
 import { createReadStream } from 'fs';
-import { pathToFileURL } from 'url';
 import path from 'path';
 import QRCode from 'qrcode';
 
 import type { ZaloAPI, ZaloMessage, ZaloMediaContent, ZaloGroupInfoResponse } from './types.js';
-import { appGetGroupInfo, appGetGroupMembersInfo } from './appApi.js';
-import { extractReactionTargetMsgIds } from './reaction.js';
 import { ZALO_MSG_TYPES } from './types.js';
 import { store } from '../store.js';
+import { markHealth } from '../health.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, downloadToTempFromCandidates, cleanTemp, convertSpriteSheetToGif, sanitizeFileName, telegramMediaBatches, runWithConcurrency } from '../utils/media.js';
-import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
-import type { ZaloStyle } from '../utils/format.js';
-import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, recentlyRecalledMsgIds, recallNotifiedStore, type ZaloQuoteData } from '../store.js';
-import { tgQueue } from '../utils/tgQueue.js';
-import { maybeAutoReply } from './autoReply.js';
+import { downloadToTemp, cleanTemp, getVideoInfo } from '../utils/media.js';
+import { extractSocialVideoUrl, enqueueSocialVideo, downloadSocialVideo, prepareTelegramVideoPaths, formatSocialVideoCaption } from '../utils/socialVideo.js';
+import { beginSocialVideoJob, buildSocialVideoJobPartManifest, completeSocialVideoJob, createDurableSocialVideoJob, failSocialVideoJob, hasSocialVideoJobPartManifestMismatch, listReplayableSocialVideoJobs, markSocialVideoJobPartDone, setSocialVideoJobPartManifest, type DurableSocialVideoJob } from '../utils/durableSocialVideoQueue.js';
+import { canAutoRepostSocialVideoTopic } from '../utils/socialVideoPolicy.js';
+import { sendZaloVideoWithClientId } from '../utils/zaloSendVideoWithClientId.js';
+import { applyMentionsHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
+import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, type ZaloQuoteData } from '../store.js';
+import { resolveTopicDisplayName, type TopicProfile } from './topic.js';
 
-// Proxy that routes every tg.* call through the rate-limit queue
-// so 429 errors are auto-retried instead of crashing the process.
-const tg = new Proxy(tgBot.telegram, {
-  get(target, prop: string) {
-    const orig = (target as unknown as Record<string, unknown>)[prop];
-    if (typeof orig !== 'function') return orig;
-    return (...args: unknown[]) =>
-      tgQueue(() => (orig as (...a: unknown[]) => Promise<unknown>).apply(target, args));
-  },
-}) as typeof tgBot.telegram;
-
-// ── Bank card HTML parser ────────────────────────────────────────────────────
+// â”€â”€ Bank card HTML parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 interface BankCardInfo {
   bankName: string;
   accountNumber: string;
   holderName?: string;
   vietqr: string;
+}
+
+
+interface LinkMeta {
+  finalUrl: string;
+  title?: string;
+  description?: string;
+  image?: string;
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractMeta(html: string, finalUrl: string): LinkMeta {
+  const pick = (patterns: RegExp[]) => {
+    for (const re of patterns) {
+      const m = html.match(re);
+      if (m?.[1]?.trim()) return decodeHtmlEntities(m[1].trim());
+    }
+    return undefined;
+  };
+  const title = pick([
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["'][^>]*>/i,
+    /<title[^>]*>([^<]+)<\/title>/i,
+  ]);
+  const description = pick([
+    /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["'][^>]*>/i,
+  ]);
+  const image = pick([
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["'][^>]*>/i,
+  ]);
+  return { finalUrl, title, description, image };
+}
+
+async function fetchLinkMeta(url: string): Promise<LinkMeta | null> {
+  try {
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    const finalUrl = resp.url || url;
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.includes('text/html')) return { finalUrl };
+    const html = await resp.text();
+    return extractMeta(html.slice(0, 300_000), finalUrl);
+  } catch (err) {
+    console.warn('[ZaloHandler] fetchLinkMeta failed:', err);
+    return null;
+  }
 }
 
 function parseBankCardHtml(html: string): BankCardInfo | null {
@@ -59,290 +109,56 @@ function parseBankCardHtml(html: string): BankCardInfo | null {
   return { bankName, accountNumber, holderName, vietqr };
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Fetch group member list and populate `userCache` so mention resolution works
  * immediately even before any group message is received.
  */
-/**
- * Re-populate the member cache for a group by re-fetching from the PC App API.
- * Called when app-session becomes available (e.g. after /loginapp).
- */
-export async function refreshGroupMemberCache(api: ZaloAPI, groupId: string): Promise<void> {
-  if (_memberCacheLoaded.has(groupId)) {
-    _memberCacheLoaded.delete(groupId);
-  }
-  await populateGroupMemberCache(api, groupId);
-}
-
 async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<void> {
   try {
-    const totalMember = await (async () => {
-      const info = await api.getGroupInfo(groupId) as { gridInfoMap?: Record<string, { totalMember?: number }> };
-      return info?.gridInfoMap?.[groupId]?.totalMember;
-    })().catch(() => undefined);
-
-    // --- Step 1: try PC App endpoint first (group-wpa.zaloapp.com, separate rate-limit) ---
-    let groupData = await appGetGroupInfo(groupId);
-    let usedFallback = false;
-
-    if (!groupData) {
-      usedFallback = true;
-      console.warn(`[Zalo] PC App API unavailable for group ${groupId}, falling back to web API (limited for hidden-member groups). Run /loginapp for full data.`);
-      // Fallback: zca-js web API (rate-limited)
-      const info = await api.getGroupInfo(groupId) as {
-        gridInfoMap?: Record<string, {
-          memVerList?: string[];
-          currentMems?: Array<{ id: string; dName?: string; zaloName?: string }>;
-          totalMember?: number;
-          hasMoreMember?: number;
-        }>;
-      };
-      groupData = info?.gridInfoMap?.[groupId] ?? null;
-    }
-
+    const info = await api.getGroupInfo(groupId) as {
+      gridInfoMap?: Record<string, {
+        memVerList?: string[];
+        totalMember?: number;
+      }>;
+    };
+    const groupData = info?.gridInfoMap?.[groupId];
     if (!groupData) {
       console.warn(`[Zalo] getGroupInfo: no data for group ${groupId}`);
       return;
     }
 
-    // --- Step 2: names already embedded in currentMems (zero extra API calls) ---
-    const knownNames = new Map<string, string>();
-    for (const m of (groupData.currentMems ?? [])) {
-      const name = m.dName?.trim() || m.zaloName?.trim();
-      if (m.id && name) knownNames.set(m.id, name);
-    }
-
-    // memVerList entries are "uid_version" — extract all UIDs
-    const allUids = (groupData.memVerList ?? [])
+    // memVerList entries are "uid_version" â€” extract UIDs
+    const uids = (groupData.memVerList ?? [])
       .map(s => s.split('_')[0])
       .filter(Boolean);
-
-    if (allUids.length === 0) {
+    if (uids.length === 0) {
       console.warn(`[Zalo] group ${groupId}: empty memVerList (totalMember=${groupData.totalMember})`);
-      if (totalMember && totalMember > 0) {
-        console.warn(`[Zalo] → Group has ${totalMember} members but API returned no member IDs. The group likely has "hide member list" enabled. Run /loginapp to enable full member scanning via PC App API.`);
-      }
       return;
     }
 
-    // Detect hidden-member group: web API returns only admins, PC App returns all
-    if (usedFallback && totalMember && allUids.length < totalMember) {
-      console.warn(`[Zalo] group ${groupId}: web API returned ${allUids.length}/${totalMember} members (likely hidden-member group). Run /loginapp for full list.`);
-    }
-
-    // Save immediately for members already covered by currentMems
+    // Batch-fetch display names (getUserInfo accepts up to ~50 per call)
+    const BATCH = 50;
     let saved = 0;
-    for (const uid of allUids) {
-      const name = knownNames.get(uid);
-      if (name) { userCache.saveForGroup(uid, name, groupId); saved++; }
-    }
-
-    // --- Step 3: remaining UIDs — try PC App profile endpoint first, then fall back ---
-    const missingUids = allUids.filter(uid => !knownNames.has(uid));
-    if (missingUids.length > 0) {
-      // Try PC App endpoint (profile-wpa.zaloapp.com) — separate rate-limit bucket
-      const appNames = await appGetGroupMembersInfo(missingUids).catch(() => null);
-      const stillMissing: string[] = [];
-
-      for (const uid of missingUids) {
-        const name = appNames?.get(uid);
-        if (name) { userCache.saveForGroup(uid, name, groupId); saved++; }
-        else stillMissing.push(uid);
-      }
-
-      // Final fallback: zca-js getUserInfo (web API)
-      if (stillMissing.length > 0) {
-        const BATCH = 50;
-        for (let i = 0; i < stillMissing.length; i += BATCH) {
-          const batch = stillMissing.slice(i, i + BATCH);
-          const resp = await api.getUserInfo(batch) as {
-            changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-            unchanged_profiles?: Record<string, unknown>;
-          };
-          const profiles = resp?.changed_profiles ?? {};
-          const unchanged = resp?.unchanged_profiles ?? {};
-          for (const uid of batch) {
-            const uidKey = uid.includes('_') ? uid : uid + '_0';
-            const p = (profiles[uidKey] ?? profiles[uid] ?? unchanged[uidKey] ?? unchanged[uid]) as
-              { displayName?: string; zaloName?: string } | undefined;
-            const name = p?.displayName?.trim() || p?.zaloName?.trim();
-            if (uid && name) { userCache.saveForGroup(uid, name, groupId); saved++; }
-          }
-        }
+    for (let i = 0; i < uids.length; i += BATCH) {
+      const batch = uids.slice(i, i + BATCH);
+      const resp = await api.getUserInfo(batch) as {
+        changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
+        unchanged_profiles?: Record<string, unknown>;
+      };
+      const profiles = resp?.changed_profiles ?? {};
+      // unchanged_profiles also has profile data
+      const unchanged = resp?.unchanged_profiles ?? {};
+      for (const uid of batch) {
+        const p = (profiles[uid] ?? unchanged[uid]) as { displayName?: string; zaloName?: string } | undefined;
+        const name = p?.displayName?.trim() || p?.zaloName?.trim();
+        if (uid && name) { userCache.save(uid, name); saved++; }
       }
     }
-
-    console.log(`[Zalo] Cached ${saved}/${allUids.length} members for group ${groupId}` +
-      (missingUids.length ? ` (currentMems: ${knownNames.size}, extra fetch: ${missingUids.length})` : ' (all from currentMems)') +
-      (usedFallback && totalMember && allUids.length < totalMember ? ` — partial! Run /loginapp for full ${totalMember} members` : ''));
+    console.log(`[Zalo] Cached ${saved}/${uids.length} members for group ${groupId}`);
   } catch (err) {
     console.warn(`[Zalo] populateGroupMemberCache failed for ${groupId}:`, err);
-  }
-}
-
-// ── Group info cache (avoid repeated getGroupInfo on every message) ───────────
-interface GroupInfoEntry { name: string; avt?: string; ts: number }
-const _groupInfoCache = new Map<string, GroupInfoEntry>();
-const GROUP_INFO_TTL = 5 * 60 * 1000; // 5 min
-
-async function getCachedGroupInfo(
-  api: ZaloAPI,
-  zaloId: string,
-): Promise<{ name?: string; avt?: string }> {
-  const hit = _groupInfoCache.get(zaloId);
-  if (hit && Date.now() - hit.ts < GROUP_INFO_TTL) return hit;
-  try {
-    const info = await api.getGroupInfo(zaloId) as ZaloGroupInfoResponse;
-    const entry: GroupInfoEntry = {
-      name: info?.gridInfoMap?.[zaloId]?.name ?? '',
-      avt:  info?.gridInfoMap?.[zaloId]?.avt,
-      ts:   Date.now(),
-    };
-    _groupInfoCache.set(zaloId, entry);
-    return entry;
-  } catch { return {}; }
-}
-
-// ── Muted group cache (avoid repeated getMute on every message) ───────────────
-interface ZaloMuteEntry {
-  id: string;
-  duration: number;
-  startTime: number;
-  systemTime?: number;
-  currentTime?: number;
-}
-
-const MUTED_GROUPS_TTL = 60 * 1000; // 1 min
-let _mutedCache: { groups: Set<string>; peers: Set<string>; ts: number } | null = null;
-
-function isActiveMute(entry: ZaloMuteEntry): boolean {
-  if (entry.duration === -1) return true;
-  if (entry.duration <= 0) return false;
-
-  const now = entry.currentTime ?? entry.systemTime ?? Math.floor(Date.now() / 1000);
-  const expiresAt = entry.startTime + entry.duration;
-  return now < expiresAt;
-}
-
-/**
- * Currently-muted Zalo thread ids, split into groups and DM peers, cached for a
- * minute. getMute() returns `groupChatEntries` (groups) and `chatEntries` (DMs).
- */
-async function getMutedZaloIds(api: ZaloAPI): Promise<{ groups: Set<string>; peers: Set<string> }> {
-  const cached = _mutedCache;
-  if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) return cached;
-
-  try {
-    const muteInfo = await api.getMute() as {
-      groupChatEntries?: ZaloMuteEntry[];
-      chatEntries?: ZaloMuteEntry[];
-    };
-    const groups = new Set((muteInfo.groupChatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
-    const peers  = new Set((muteInfo.chatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
-    _mutedCache = { groups, peers, ts: Date.now() };
-    return _mutedCache;
-  } catch (err) {
-    console.warn('[Zalo→TG] Failed to fetch Zalo mute state:', err);
-    return { groups: new Set(), peers: new Set() };
-  }
-}
-
-/** Skip-muted-groups behavior (opt-in): drop messages from muted Zalo groups. */
-async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
-  if (!config.zalo.skipMutedGroups) return false;
-  return (await getMutedZaloIds(api)).groups.has(groupId);
-}
-
-/**
- * Mirror Zalo's "mute notifications" onto Telegram: a thread muted on Zalo is
- * delivered silently (disable_notification) — the message still arrives, it just
- * doesn't ping. Covers both groups and DMs.
- */
-async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promise<boolean> {
-  if (!config.zalo.muteSilentMirror) return false;
-  const { groups, peers } = await getMutedZaloIds(api);
-  return type === 1 ? groups.has(threadId) : peers.has(threadId);
-}
-
-// In-flight topic creation promises — prevents duplicate topic creation when
-// many messages arrive concurrently for the same conversation (e.g. 20-photo album).
-const _pendingTopics = new Map<string, Promise<number>>();
-
-async function resolveUserDisplayName(
-  api: ZaloAPI,
-  uid: string | undefined,
-  fallback = 'ai đó',
-  groupId?: string,
-): Promise<string> {
-  const cleanUid = uid?.trim();
-  if (!cleanUid) return fallback;
-
-  const friend = friendsCache.get(cleanUid);
-  const contactName = friend?.alias?.trim()
-    || aliasCache.get(cleanUid)?.trim()
-    || friend?.displayName?.trim();
-  if (contactName) return contactName;
-
-  if (groupId) {
-    const groupName = userCache.getNameInGroup(cleanUid, groupId)?.trim();
-    if (groupName) return groupName;
-  }
-
-  const cached = userCache.getName(cleanUid);
-  if (cached?.trim()) return cached;
-
-  try {
-    const resp = await api.getUserInfo(cleanUid) as {
-      changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-      unchanged_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-    };
-    // API appends "_0" to bare UIDs before sending, so the response key is "uid_0"
-    const uidKey = cleanUid.includes('_') ? cleanUid : `${cleanUid}_0`;
-    const profile =
-      resp?.changed_profiles?.[uidKey] ??
-      resp?.changed_profiles?.[cleanUid] ??
-      resp?.unchanged_profiles?.[uidKey] ??
-      resp?.unchanged_profiles?.[cleanUid];
-    const name = profile?.displayName?.trim() || profile?.zaloName?.trim();
-    if (name) {
-      userCache.save(cleanUid, name);
-      return name;
-    }
-  } catch (err) {
-    console.warn(`[Zalo] resolveUserDisplayName failed for ${cleanUid}:`, err);
-  }
-
-  // Prefer the caller-supplied fallback (e.g. senderName from message data)
-  // over the raw UID — only use UID when no real name is available at all.
-  return (fallback && fallback !== 'ai đó') ? fallback : (cleanUid || fallback);
-}
-
-async function maybeRenameExistingDmTopic(
-  topicId: number,
-  zaloId: string,
-  displayName: string,
-): Promise<void> {
-  const entry = store.getEntryByTopic(topicId);
-  if (!entry || entry.type !== ThreadType.User || entry.name === displayName) return;
-
-  const nextName = topicName(displayName, ThreadType.User);
-  try {
-    await tg.editForumTopic(config.telegram.groupId, topicId, { name: nextName });
-    store.updateName(topicId, displayName);
-    console.log(`[Zalo→TG] Renamed DM topic for ${zaloId}: "${entry.name}" → "${displayName}"`);
-  } catch (err) {
-    if (isTopicDeletedError(err)) throw err;
-    // Telegram rejects renames whose formatted title equals the current one
-    // (raw displayName changed, rendered topic name didn't) — still record the
-    // new name locally and stay silent instead of spamming a warning (issue #65).
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/topic_not_modified|topic not modified/i.test(msg)) {
-      store.updateName(topicId, displayName);
-      return;
-    }
-    console.warn(`[Zalo→TG] Failed to rename DM topic ${topicId} for ${zaloId}:`, err);
   }
 }
 
@@ -351,136 +167,43 @@ async function getOrCreateTopic(
   type: 0 | 1,
   displayName: string,
   avatarUrl?: string,
-  forceRecreate = false,
 ): Promise<number> {
-  if (!forceRecreate) {
-    const existing = store.getTopicByZalo(zaloId, type);
-    if (existing !== undefined) {
-      await maybeRenameExistingDmTopic(existing, zaloId, displayName);
-      return existing;
-    }
-  }
-
-  const pendingKey = `${type}:${zaloId}`;
-  const inFlight = _pendingTopics.get(pendingKey);
-  if (inFlight) return inFlight;
-
-  const promise = _doCreateTopic(zaloId, type, displayName, avatarUrl)
-    .finally(() => _pendingTopics.delete(pendingKey));
-  _pendingTopics.set(pendingKey, promise);
-  return promise;
-}
-
-/**
- * Check if a TG API error means the topic/thread was deleted.
- * If so, remove the stale mapping and re-throw so the caller can recreate.
- */
-function isTopicDeletedError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return msg.includes('message thread not found') || msg.includes('TOPIC_CLOSED') || msg.includes('thread not found');
-}
-
-/**
- * Returns true if the error is a media-download failure (axios ETIMEDOUT,
- * ECONNRESET, etc.) — i.e. the CDN was unreachable after all retries.
- * Used in the top-level catch to send a user-facing notification instead of
- * silently dropping the message.
- */
-function isDownloadError(err: unknown): boolean {
-  if (err == null || typeof err !== 'object') return false;
-  const e = err as Record<string, unknown>;
-  // AxiosError carries .isAxiosError and .code directly
-  if (e.isAxiosError === true) return true;
-  const code = typeof e.code === 'string' ? e.code : '';
-  if (['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED', 'ECONNABORTED'].includes(code)) return true;
-  // Nested cause (AggregateError wrapping ETIMEDOUT)
-  if (e.cause != null && isDownloadError(e.cause)) return true;
-  return false;
-}
-
-/**
- * Wrapper around a TG send call: if it fails because the topic was deleted,
- * remove stale mapping, recreate the topic, and retry once.
- */
-async function sendWithTopicRecovery<T>(
-  zaloId: string,
-  type: 0 | 1,
-  displayName: string,
-  avatarUrl: string | undefined,
-  sendFn: (topicId: number) => Promise<T>,
-  currentTopicId: number,
-): Promise<T> {
-  try {
-    return await sendFn(currentTopicId);
-  } catch (err) {
-    if (!isTopicDeletedError(err)) throw err;
-    console.warn(`[Zalo→TG] Topic ${currentTopicId} deleted — removing mapping and recreating for ${zaloId}`);
-    store.remove(currentTopicId);
-    const newTopicId = await getOrCreateTopic(zaloId, type, displayName, avatarUrl, true);
-    return sendFn(newTopicId);
-  }
-}
-
-async function _doCreateTopic(
-  zaloId: string,
-  type: 0 | 1,
-  displayName: string,
-  avatarUrl?: string,
-): Promise<number> {
-  // Re-check after acquiring "lock" — another concurrent call may have finished
   const existing = store.getTopicByZalo(zaloId, type);
   if (existing !== undefined) return existing;
 
   const name  = topicName(displayName, type);
   const color = type === ThreadType.Group ? 0xFF93B2 : 0x6FB9F0;
 
-  let topic: { message_thread_id: number };
-  try {
-    topic = await tg.createForumTopic(
-      config.telegram.groupId,
-      name,
-      { icon_color: color },
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('not enough rights') || msg.includes('TOPIC_') || msg.includes('rights to manage')) {
-      console.error(`[Zalo→TG] Cannot create topic — bot lacks "Manage Topics" admin right. Falling back to General topic.`);
-      // Use topic ID 1 (General) as fallback so messages still get delivered
-      const fallbackId = 1;
-      store.set({ topicId: fallbackId, zaloId, type, name: displayName });
-      return fallbackId;
-    }
-    throw err;
-  }
+  const topic = await tgBot.telegram.createForumTopic(
+    config.telegram.groupId,
+    name,
+    { icon_color: color },
+  );
 
   const topicId = topic.message_thread_id;
   store.set({ topicId, zaloId, type, name: displayName });
-  console.log(`[Zalo→TG] New topic: "${name}" (topicId=${topicId})`);
+  console.log(`[Zaloâ†’TG] New topic: "${name}" (topicId=${topicId})`);
 
   // Pin group avatar as the first message in the topic
   if (type === 1 /* Group */ && avatarUrl) {
-    let localPath: string | undefined;
     try {
-      localPath = await downloadToTemp(avatarUrl, `avatar_${Date.now()}.jpg`);
-      const avatarMsg = await withLocalMediaFallback(
-        forceMultipart => tg.sendPhoto(
-          config.telegram.groupId,
-          telegramMediaFile(localPath!, forceMultipart),
-          {
-            message_thread_id: topicId,
-            caption: `🖼 Ảnh đại diện nhóm <b>${escapeHtml(displayName)}</b>`,
-            parse_mode: 'HTML',
-          },
-        ),
-        'Group avatar upload',
+      const localPath = await downloadToTemp(avatarUrl, `avatar_${Date.now()}.jpg`);
+      const stream = createReadStream(localPath);
+      const avatarMsg = await tgBot.telegram.sendPhoto(
+        config.telegram.groupId,
+        { source: stream },
+        {
+          message_thread_id: topicId,
+          caption: `ðŸ–¼ áº¢nh Ä‘áº¡i diá»‡n nhÃ³m <b>${escapeHtml(displayName)}</b>`,
+          parse_mode: 'HTML',
+        },
       );
+      await cleanTemp(localPath);
       try {
-        await tg.pinChatMessage(config.telegram.groupId, avatarMsg.message_id, { disable_notification: true });
+        await tgBot.telegram.pinChatMessage(config.telegram.groupId, avatarMsg.message_id, { disable_notification: true });
       } catch { /* pinning requires admin rights */ }
     } catch (avatarErr) {
-      console.warn(`[Zalo→TG] Failed to pin group avatar for ${displayName}:`, avatarErr);
-    } finally {
-      if (localPath) await cleanTemp(localPath);
+      console.warn(`[Zaloâ†’TG] Failed to pin group avatar for ${displayName}:`, avatarErr);
     }
   }
 
@@ -507,97 +230,29 @@ function parseContent(raw: string | ZaloMediaContent | Record<string, unknown>):
   return { text: null, media: raw as ZaloMediaContent };
 }
 
-/** Prefer zero-copy file URIs with telegram-bot-api --local. */
-function telegramMediaFile(filePath: string, forceMultipart = false): string | { source: ReturnType<typeof createReadStream> } {
-  return config.telegram.localServer && !forceMultipart
-    ? pathToFileURL(filePath).toString()
-    : { source: createReadStream(filePath) };
-}
 
-function telegramErrorCode(err: unknown): number | undefined {
-  if (!err || typeof err !== 'object' || !('response' in err)) return undefined;
-  const response = (err as { response?: { error_code?: unknown } }).response;
-  return typeof response?.error_code === 'number' ? response.error_code : undefined;
-}
-
-function telegramErrorDescription(err: unknown): string {
-  if (!err || typeof err !== 'object') return String(err);
-  if ('response' in err) {
-    const response = (err as { response?: { description?: unknown } }).response;
-    if (typeof response?.description === 'string') return response.description;
-  }
-  return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * A local Bot API process/container may not share the bridge's /tmp mount. In
- * that case file:// is rejected before Telegram accepts the request. Retrying
- * a rejected (HTTP 400) request as multipart is safe and works across that
- * deployment boundary.
- */
-async function withLocalMediaFallback<T>(
-  operation: (forceMultipart: boolean) => Promise<T>,
-  label: string,
-): Promise<T> {
+function pickMediaUrl(media: ZaloMediaContent): string | undefined {
+  const direct = media.href ?? (media as Record<string, unknown>).url ?? (media as Record<string, unknown>).fileUrl ??
+    (media as Record<string, unknown>).normalUrl ?? (media as Record<string, unknown>).hdUrl ??
+    (media as Record<string, unknown>).videoUrl;
+  if (typeof direct === 'string' && direct.length > 0) return direct;
+  if (!media.params) return undefined;
   try {
-    return await operation(false);
-  } catch (err) {
-    const description = telegramErrorDescription(err);
-    const isLocalFileError = telegramErrorCode(err) === 400
-      && /(file:\/\/|http url|url host|wrong file|failed to get.*url|file.*not found|can't open|unsupported.*protocol)/i.test(description);
-    if (!config.telegram.localServer || !isLocalFileError) throw err;
-    console.warn(`[Zalo→TG] ${label}: local URI rejected (${description}); retrying multipart`);
-    return operation(true);
-  }
+    const params = JSON.parse(media.params) as Record<string, unknown>;
+    for (const key of ['hdUrl', 'videoUrl', 'fileUrl', 'normalUrl', 'url', 'href', 'downloadUrl', 'src']) {
+      const value = params[key];
+      if (typeof value === 'string' && value.length > 0) return value;
+    }
+  } catch { /* ignore */ }
+  return undefined;
 }
 
-type TelegramMediaSendOptions = Parameters<typeof tg.sendAnimation>[2];
-
-/** Deliver an animation while preserving a Telegram message for every format. */
-async function sendAnimationWithFallback(
-  localPath: string,
-  options: TelegramMediaSendOptions,
-  fileName: string,
-): Promise<{ message_id: number }> {
-  try {
-    return await withLocalMediaFallback(
-      forceMultipart => tg.sendAnimation(
-        config.telegram.groupId,
-        telegramMediaFile(localPath, forceMultipart),
-        options,
-      ),
-      'Animation upload',
-    );
-  } catch (animationErr) {
-    console.warn('[Zalo→TG] Animation rejected; trying video:', animationErr);
-  }
-
-  try {
-    return await withLocalMediaFallback(
-      forceMultipart => tg.sendVideo(
-        config.telegram.groupId,
-        telegramMediaFile(localPath, forceMultipart),
-        options as Parameters<typeof tg.sendVideo>[2],
-      ),
-      'Animation video fallback',
-    );
-  } catch (videoErr) {
-    console.warn('[Zalo→TG] Animation video rejected; sending as document:', videoErr);
-  }
-
-  return withLocalMediaFallback(
-    forceMultipart => tg.sendDocument(
-      config.telegram.groupId,
-      forceMultipart
-        ? { source: createReadStream(localPath), filename: fileName }
-        : telegramMediaFile(localPath, false),
-      options as Parameters<typeof tg.sendDocument>[2],
-    ),
-    'Animation document fallback',
-  );
+function shortContent(raw: unknown): string {
+  try { return JSON.stringify(raw).slice(0, 800); }
+  catch { return String(raw).slice(0, 800); }
 }
 
-// ── Poll helpers ─────────────────────────────────────────────────────────────
+// â”€â”€ Poll helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import type { PollOptions } from 'zca-js';
 
@@ -605,243 +260,121 @@ function buildScoreText(header: string, options: Pick<PollOptions, 'content' | '
   const total = options.reduce((s, o) => s + (o.votes ?? 0), 0);
   const lines = options.map(o => {
     const pct = total > 0 ? Math.round((o.votes / total) * 100) : 0;
-    const bar = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
-    return `${escapeHtml(o.content)}\n  ${bar} ${o.votes} phiếu (${pct}%)`;
-});
-
-  const status = closed ? ' <i>[Đã đóng]</i>' : '';
-  return `📊 <b>${escapeHtml(header)}</b>${status}\n\nTổng: ${total} phiếu\n\n${lines.join('\n\n')}`;
+    const bar = 'â–ˆ'.repeat(Math.round(pct / 10)) + 'â–‘'.repeat(10 - Math.round(pct / 10));
+    return `${escapeHtml(o.content)}\n  ${bar} ${o.votes} phiáº¿u (${pct}%)`;
+  });
+  const status = closed ? ' <i>[ÄÃ£ Ä‘Ã³ng]</i>' : '';
+  return `ðŸ“Š <b>${escapeHtml(header)}</b>${status}\n\nTá»•ng: ${total} phiáº¿u\n\n${lines.join('\n\n')}`;
 }
 
-// ── Main handler ─────────────────────────────────────────────────────────────
+// â”€â”€ Main handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Track which groups already had their member cache populated this session. */
 const _memberCacheLoaded = new Set<string>();
 
-/** Clear the loaded-set so the next setupZaloHandler re-populates all groups. */
-export function resetMemberCacheLoaded(): void {
-  _memberCacheLoaded.clear();
-}
-
-/**
- * In-flight dedup set — holds msgIds that are currently being processed.
- * Prevents race condition where multiple reaction re-emits arrive concurrently
- * before any of them is saved to msgStore, causing all to pass the msgStore check.
- */
-const _inFlightMsgIds = new Set<string>();
-
-/** The active 'message' handler, captured so /history can replay messages
- *  through the exact same pipeline AND await each one (guaranteeing order,
- *  which `listener.emit` cannot since the handler is async and not awaited). */
-let _activeMessageHandler: ((msg: ZaloMessage) => Promise<void>) | null = null;
-
-interface PendingHistoryRequest {
-  api: ZaloAPI;
-  groupId: string;
-  count: number;
-  pages: number;
-  messages: ZaloMessage[];
-  seen: Set<string>;
-  timer: ReturnType<typeof setTimeout>;
-  resolve: (messages: ZaloMessage[]) => void;
-  reject: (err: Error) => void;
-}
-
-let _pendingHistoryRequest: PendingHistoryRequest | null = null;
-
-function finishHistoryRequest(req: PendingHistoryRequest, err?: Error): void {
-  if (_pendingHistoryRequest !== req) return;
-  clearTimeout(req.timer);
-  _pendingHistoryRequest = null;
-  if (err) { req.reject(err); return; }
-  const newest = [...req.messages]
-    .sort((a, b) => Number(b?.data?.ts ?? 0) - Number(a?.data?.ts ?? 0))
-    .slice(0, req.count)
-    .sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0));
-  req.resolve(newest);
-}
-
-/** Fetch group history through the working listener WebSocket protocol. */
-export function requestGroupHistory(
-  api: ZaloAPI,
-  groupId: string,
-  count: number,
-): Promise<ZaloMessage[]> {
-  if (_pendingHistoryRequest) {
-    return Promise.reject(new Error('Đang có một yêu cầu /history khác chạy.'));
+export function setupZaloHandler(api: ZaloAPI): void {
+  // Pre-populate userCache for all existing group topics on startup
+  for (const entry of store.all()) {
+    if (entry.type === 1 /* Group */) {
+      void populateGroupMemberCache(api, entry.zaloId);
+      _memberCacheLoaded.add(entry.zaloId);
+    }
   }
-  return new Promise<ZaloMessage[]>((resolve, reject) => {
-    const req: PendingHistoryRequest = {
-      api,
-      groupId,
-      count,
-      pages: 0,
-      messages: [],
-      seen: new Set(),
-      resolve,
-      reject,
-      timer: setTimeout(() => {
-        if (req.messages.length > 0) finishHistoryRequest(req);
-        else finishHistoryRequest(req, new Error('Zalo không trả dữ liệu lịch sử trong 20 giây.'));
-      }, 20_000),
-    };
-    _pendingHistoryRequest = req;
-    api.listener.requestOldMessages(ThreadType.Group);
-  });
-}
 
-/**
- * Replay messages through the live message pipeline, one at a time, awaiting
- * each so they render to Telegram in the given order. Returns the count
- * processed. Used by the /history backfill command.
- */
-export async function replayHistoryMessages(messages: ZaloMessage[], gapMs = 250): Promise<number> {
-  const handler = _activeMessageHandler;
-  if (!handler) return 0;
-  let processed = 0;
-  for (const msg of messages) {
+  const queuedDurableZaloSocialVideoJobs = new Set<string>();
+  const scheduledDurableZaloSocialVideoRetries = new Set<string>();
+  const scheduleDurableZaloRetry = (job: DurableSocialVideoJob, delayMs: number): void => {
+    if (scheduledDurableZaloSocialVideoRetries.has(job.id)) return;
+    scheduledDurableZaloSocialVideoRetries.add(job.id);
+    const timer = setTimeout(() => {
+      scheduledDurableZaloSocialVideoRetries.delete(job.id);
+      enqueueDurableZaloSocialVideoJob(job);
+    }, delayMs);
+    timer.unref?.();
+  };
+  const runDurableZaloSocialVideoJob = async (
+    job: DurableSocialVideoJob,
+    sendOptions: { message_thread_id: number; parse_mode: 'HTML'; caption?: string },
+    saveMapping?: (sent: { message_id: number }) => void,
+  ): Promise<void> => {
+    const started = beginSocialVideoJob(job.id);
+    if (!started || started.status === 'done' || started.status === 'failed') return;
+    let localPaths: string[] = [];
+    let downloadedPaths: string[] = [];
     try {
-      await handler(msg);
-      processed++;
-    } catch (err) {
-      console.warn('[replayHistory] handler error:', err);
-    }
-    if (gapMs > 0) await new Promise(r => setTimeout(r, gapMs));
-  }
-  return processed;
-}
-
-export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
-  // Pre-populate userCache for all existing group topics on startup.
-  // Stagger calls by 2 s each to avoid triggering the rate limiter (code 221).
-  const startupGroups = store.all().filter(e => e.type === 1 /* Group */);
-  void (async () => {
-    for (let i = 0; i < startupGroups.length; i++) {
-      const gid = startupGroups[i].zaloId;
-      // A live message may have already warmed this group via the lazy path
-      // (handler below) during the stagger window — don't redo it, and don't
-      // mark groups "loaded" up-front or the lazy path is suppressed for groups
-      // whose cache hasn't actually populated yet.
-      if (_memberCacheLoaded.has(gid)) continue;
-      // Space the calls (a 0 ms gap made this a burst that could trip Zalo's
-      // rate limiter / code 221 on startup with many group topics).
-      if (i > 0) await new Promise(r => setTimeout(r, 2000));
-      _memberCacheLoaded.add(gid);
-      await populateGroupMemberCache(api, gid);
-    }
-  })();
-
-  // Load address-book names BEFORE attaching listeners so that the first
-  // message event already has names available for topic naming.
-  // getAliasList only returns explicitly set aliases (small subset), while
-  // getAllFriends returns the full contact list with displayName already using
-  // the saved contact name when present.
-  try {
-    let aliasCount = 0;
-    const aliasResult = await api.getAliasList() as { items?: Array<{ userId: string; alias: string }> };
-    if (aliasResult?.items?.length) {
-      aliasCache.setAll(aliasResult.items);
-      aliasCount = aliasResult.items.length;
-    }
-
-    let friendCount = 0;
-    const friends = await api.getAllFriends() as Array<{
-      userId: string;
-      displayName?: string;
-      zaloName?: string;
-      username?: string;
-    }>;
-    if (Array.isArray(friends) && friends.length) {
-      friendsCache.set(friends.map(f => ({
-        userId:      f.userId,
-        // zca-js User.displayName is the logged-in account's address-book label.
-        // zaloName is the public profile name. Do NOT overwrite displayName with
-        // getAliasList-only aliases, or we lose saved contact names such as "Tỷ cưng".
-        displayName: (f.displayName || f.zaloName || f.username || f.userId).trim(),
-      })));
-      friendCount = friends.length;
-    }
-
-    console.log(`[Zalo] Loaded ${aliasCache.size()} contact names (${aliasCount} aliases, ${friendCount} friends)`);
-  } catch (err) {
-    console.warn('[Zalo] Failed to load address-book names:', err);
-  }
-
-  const handleZaloMessage = async (msg: ZaloMessage): Promise<void> => {
-    try {
-      // Skip TG→Zalo echo (re-emitted by Zalo server) but forward
-      // real self messages sent directly from the Zalo app.
-      if (msg.isSelf) {
-        // Hydrate quote metadata from self echo:
-        // TG→Zalo media is first stored with placeholder quote data; when echo
-        // arrives we replace it with real msgType/content so future replies in
-        // Telegram produce native quote previews in Zalo.
-        const _tgId = msgStore.getTgMsgId(msg.data.msgId)
-          ?? (msg.data.realMsgId ? msgStore.getTgMsgId(msg.data.realMsgId) : undefined)
-          ?? ((msg.data.cliMsgId && msg.data.cliMsgId !== '0')
-            ? msgStore.getTgMsgId(msg.data.cliMsgId)
-            : undefined);
-
-        if (_tgId !== undefined) {
-          const { text: _echoText, media: _echoMedia } = parseContent(msg.data.content);
-          const _echoContent = _echoText !== null ? _echoText : (_echoMedia as Record<string, unknown>);
-          msgStore.updateQuoteFromEcho(_tgId, {
-            msgId: msg.data.msgId || msg.data.realMsgId || '',
-            cliMsgId: msg.data.cliMsgId ?? '',
-            msgType: msg.data.msgType ?? ZALO_MSG_TYPES.TEXT,
-            content: _echoContent,
-            ts: msg.data.ts,
-            ttl: msg.data.ttl ?? 0,
-          });
-        }
-
-        // If this msgId is already tracked in sentMsgStore OR we're in the
-        // middle of sending to this Zalo thread → it's an echo, skip.
-        const isEcho = sentMsgStore.getByZaloMsgId(msg.data.msgId) !== undefined
-          || sentMsgStore.isSendingTo(msg.threadId);
-        if (isEcho) {
-          console.log(`[Zalo→TG] Skip echo self message (${msg.data.msgId})`);
-          return;
-        }
-        // Real self message from Zalo app — fall through and forward to Telegram
+      console.log(`[Zalo→TG][SocialVideo] Downloading ${started.label}: ${started.url}`);
+      const downloaded = await downloadSocialVideo(started.url);
+      downloadedPaths = downloaded.paths;
+      localPaths = await prepareTelegramVideoPaths(downloaded.paths);
+      const currentManifest = await buildSocialVideoJobPartManifest(localPaths);
+      if (hasSocialVideoJobPartManifestMismatch(started, currentManifest)) {
+        throw new Error(`Durable social video part manifest mismatch for ${started.id}`);
       }
-
-      // Skip duplicate deliveries — Zalo re-emits the same message event when
-      // someone reacts (❤️, 👍, etc.), causing the same content to be forwarded
-      // multiple times. Check both the persistent store AND the in-flight set
-      // (handles concurrent re-emits that arrive before any is saved to msgStore).
-      const _primaryMsgId = msg.data.msgId;
-      if (_primaryMsgId) {
-        if (msgStore.getTgMsgId(_primaryMsgId) !== undefined || _inFlightMsgIds.has(_primaryMsgId)) {
-          console.log(`[Zalo→TG] Skip duplicate/reaction re-emit msgId=${_primaryMsgId}`);
+      setSocialVideoJobPartManifest(started.id, currentManifest);
+      for (let i = 0; i < localPaths.length; i++) {
+        if (started.sentParts?.[String(i)]) continue;
+        const partPath = localPaths[i]!;
+        const videoInfo = await getVideoInfo(partPath).catch(() => ({ durationMs: 30_000, width: 720, height: 1280 }));
+        const partCaption = escapeHtml(formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined));
+        const sent = await tgBot.telegram.sendVideo(
+          config.telegram.groupId,
+          { source: createReadStream(partPath) },
+          { ...sendOptions, caption: partCaption, duration: Math.round(videoInfo.durationMs / 1000), width: videoInfo.width, height: videoInfo.height },
+        );
+        saveMapping?.(sent);
+        markSocialVideoJobPartDone(started.id, i, String(sent.message_id), sent);
+        console.log(`[Zalo→TG][SocialVideo] Sent part ${i + 1}/${localPaths.length} msgId=${sent.message_id}`);
+      }
+      completeSocialVideoJob(started.id);
+    } finally {
+      for (const p of new Set([...downloadedPaths, ...localPaths])) await cleanTemp(p);
+    }
+  };
+  const enqueueDurableZaloSocialVideoJob = (job: DurableSocialVideoJob, sendOptions?: { message_thread_id: number; parse_mode: 'HTML'; caption?: string }, saveMapping?: (sent: { message_id: number }) => void): void => {
+    if (queuedDurableZaloSocialVideoJobs.has(job.id) || job.status === 'done' || job.status === 'failed') return;
+    queuedDurableZaloSocialVideoJobs.add(job.id);
+    void enqueueSocialVideo(`zalo:${job.threadType}:${job.zaloId}`, `${job.label}:zalo`, async () => {
+      try {
+        await runDurableZaloSocialVideoJob(job, sendOptions ?? { message_thread_id: job.topicId, parse_mode: 'HTML' }, saveMapping);
+      } catch (err) {
+        const failed = failSocialVideoJob(job.id, err);
+        if (failed?.status === 'pending') {
+          const delay = Math.min(60_000, 10_000 * Math.max(1, failed.attempts));
+          console.warn(`[SocialVideo][Durable] retry ${failed.id} in ${delay}ms`);
+          scheduleDurableZaloRetry(failed, delay);
           return;
         }
-        _inFlightMsgIds.add(_primaryMsgId);
-        // Auto-remove from in-flight after 10 s (msgStore.save will be the permanent record)
-        setTimeout(() => _inFlightMsgIds.delete(_primaryMsgId), 10_000);
+        if (failed) {
+          console.error('[SocialVideo] Auto repost failed:', err);
+          try { await api.sendMessage({ msg: 'Không tải được video từ link này.' }, failed.zaloId, failed.threadType); } catch { /* ignore */ }
+        }
+      }
+    }, job.id).catch(err => {
+      const failed = failSocialVideoJob(job.id, err);
+      if (failed?.status === 'pending') scheduleDurableZaloRetry(failed, 30_000);
+    }).finally(() => queuedDurableZaloSocialVideoJobs.delete(job.id));
+  };
+  const replayDurableZaloSocialVideoJobs = (): void => {
+    const jobs = listReplayableSocialVideoJobs().filter(job => job.source === 'zalo' && job.target === 'telegram');
+    if (jobs.length) console.log(`[SocialVideo][Durable] replaying ${jobs.length} Zalo→Telegram job(s)`);
+    for (const job of jobs) enqueueDurableZaloSocialVideoJob(job);
+  };
+  replayDurableZaloSocialVideoJobs();
+  api.listener.on('message', async (msg: ZaloMessage) => {
+
+    try {
+      if (msg.isSelf) {
+        const ownMsgIds = [msg.data?.msgId, msg.data?.realMsgId]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0);
+        if (ownMsgIds.some(id => sentMsgStore.getByZaloMsgId(id) !== undefined)) return;
       }
 
       const zaloId     = msg.threadId;
       const type       = msg.type as 0 | 1;
-      const ownUid     = String(api.getOwnId?.() ?? '');
-      const senderUid  = msg.isSelf && ownUid ? ownUid : (msg.data.uidFrom ?? '');
-      const senderName = msg.isSelf ? 'Bạn' : (msg.data.dName ?? msg.data.uidFrom);
+      const senderName = msg.data.dName?.trim() || msg.data.uidFrom || 'Zalo user';
       const msgType    = msg.data.msgType ?? ZALO_MSG_TYPES.TEXT;
-
-      // Skip threads explicitly excluded via ZALO_EXCLUDE_THREADS (issue #61)
-      if (config.zalo.excludeThreads[`${type}:${zaloId}`]) {
-        console.log(`[Zalo→TG] Skip excluded thread ${zaloId} (type=${type})`);
-        return;
-      }
-
-      if (type === ThreadType.Group && await isMutedZaloGroup(api, zaloId)) {
-        console.log(`[Zalo→TG] Skip muted group ${zaloId}`);
-        return;
-      }
-
-      // Mirror Zalo's mute → deliver this thread silently on Telegram. Computed
-      // once here (before any message-type branch) so every send path can use it.
-      const silent = await isMutedOnZalo(api, zaloId, type);
+      console.log('[Zalo?TG] Incoming:', JSON.stringify({ msgType, isSelf: msg.isSelf, uidFrom: msg.data.uidFrom, dName: msg.data.dName, msgId: msg.data.msgId, realMsgId: msg.data.realMsgId }));
+      markHealth({ status: 'ok', lastZaloEventAt: new Date().toISOString() });
 
       // Pre-populate member cache the first time we see a new group
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
@@ -849,64 +382,35 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         void populateGroupMemberCache(api, zaloId);
       }
 
-      // Auto-reply (offline mode): answer incoming text DMs when enabled.
-      // Fire-and-forget; only 1-1 threads are answered (see autoReply.ts).
-      // Gate on TEXT so we never auto-reply to stickers/media/system events.
-      if (!msg.isSelf && msgType === ZALO_MSG_TYPES.TEXT) {
-        void maybeAutoReply(api, zaloId, type);
+      // Keep userCache up-to-date so TGâ†’Zalo mention resolution works
+      userCache.save(msg.data.uidFrom, senderName);
+
+      // Resolve conversation name. Self DM events carry logged-in account name in dName.
+      let topicProfile: TopicProfile | undefined;
+      if (type === ThreadType.User && store.getTopicByZalo(zaloId, type) === undefined) {
+        try {
+          const resp = await api.getUserInfo(zaloId) as {
+            changed_profiles?: Record<string, TopicProfile>;
+            unchanged_profiles?: Record<string, TopicProfile>;
+          };
+          topicProfile = resp?.changed_profiles?.[zaloId] ?? resp?.unchanged_profiles?.[zaloId];
+        } catch { /* non-fatal; helper keeps self name out of topic */ }
       }
 
-      // Parse content early so we can start media download in parallel with topic resolution
-      const { text, media } = parseContent(msg.data.content);
-
-      // Determine media URL eagerly (before topic lookup) so download starts immediately
-      const _eagerMediaUrl = (() => {
-        if (msgType === ZALO_MSG_TYPES.VIDEO || msgType === ZALO_MSG_TYPES.VOICE ||
-            msgType === ZALO_MSG_TYPES.GIF   || msgType === ZALO_MSG_TYPES.FILE) return media.href;
-        // Photos are deliberately downloaded after the short album debounce.
-        // Starting one eager download per event leaks temp files when several
-        // events are merged into a single Telegram media group.
-        return undefined;
-      })();
-      const _extGuess = _eagerMediaUrl
-        ? (path.extname(_eagerMediaUrl.split('?')[0] ?? '').toLowerCase() || '.bin')
-        : '.bin';
-      // Start download immediately; we'll await it inside the type-specific branch
-      const earlyDlPromise = _eagerMediaUrl
-        ? downloadToTemp(_eagerMediaUrl, `dl_${Date.now()}${_extGuess}`)
-        : null;
-
-      // Resolve display name:
-      //   - Group: use group name from getGroupInfo for topic, but use the sender's
-      //     contact-book name in message captions/headers when available.
-      //   - DM: use the PEER's contact-book name (zaloId = peer UID), not the raw sender dName.
-      // NOTE: We do NOT pass `senderName` (msg.data.dName) as fallback to
-      // resolveUserDisplayName because Zalo's dName field is unreliable — it can
-      // contain filenames or metadata (e.g. "My Documents") instead of the sender's
-      // real name. The default fallback chain (UID → 'ai đó') is safer.
-      let displayName = senderName;
-      let bridgeSenderName = msg.isSelf
-        ? senderName
-        : await resolveUserDisplayName(api, senderUid, 'ai đó', type === ThreadType.Group ? zaloId : undefined);
+      let displayName = resolveTopicDisplayName({
+        type,
+        zaloId,
+        senderName,
+        isSelf: msg.isSelf,
+        profile: topicProfile,
+      });
       let groupAvatarUrl: string | undefined;
       if (type === ThreadType.Group) {
-        const info = await getCachedGroupInfo(api, zaloId);
-        displayName = info.name || senderName;
-        groupAvatarUrl = info.avt;
-      } else {
-        // For DMs, zaloId is the peer's UID — resolve their real name for the topic name.
-        // bridgeSenderName is already set correctly above (sender's name, or 'Bạn' if isSelf).
-        const realName = await resolveUserDisplayName(api, zaloId);
-        displayName = realName;
-      }
-
-      // Keep userCache up-to-date so TG→Zalo mention resolution works.
-      // Use the resolved bridgeSenderName rather than the raw senderName (dName)
-      // to avoid caching metadata-like values (e.g. "My Documents").
-      if (type === ThreadType.Group && senderUid) {
-        userCache.saveForGroup(senderUid, bridgeSenderName, zaloId);
-      } else if (senderUid) {
-        userCache.save(senderUid, bridgeSenderName);
+        try {
+          const info = await api.getGroupInfo(zaloId) as ZaloGroupInfoResponse;
+          displayName = info?.gridInfoMap?.[zaloId]?.name ?? senderName;
+          groupAvatarUrl = info?.gridInfoMap?.[zaloId]?.avt;
+        } catch { /* non-fatal */ }
       }
 
       const topicId = await getOrCreateTopic(zaloId, type, displayName, groupAvatarUrl);
@@ -914,74 +418,35 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       // Resolve Telegram reply target from incoming Zalo quote (if any)
       let tgReplyMsgId: number | undefined;
       if (msg.data.quote) {
-        // Zalo sets globalMsgId=0 for DMs — fall back to cliMsgId in that case.
-        // Build a list of candidate IDs to try in order.
-        const _candidateIds: string[] = [];
-        const _g = msg.data.quote.globalMsgId;
-        const _c = msg.data.quote.cliMsgId;
-        if (_g && _g !== 0) _candidateIds.push(String(_g));
-        if (_c && _c !== 0) _candidateIds.push(String(_c));
-
-        for (const globalId of _candidateIds) {
-          if (tgReplyMsgId !== undefined) break;
-          // Primary: messages received from Zalo and forwarded to TG.
-          // IMPORTANT: Zalo globalMsgId is NOT unique across groups — validate the found
-          // mapping belongs to the same thread to avoid quoting a message from a different group.
-          const _candidateTg = msgStore.getTgMsgId(globalId);
-          if (_candidateTg !== undefined) {
-            const _quoteData = msgStore.getQuote(_candidateTg);
-            if (!_quoteData || _quoteData.zaloId === zaloId) {
-              tgReplyMsgId = _candidateTg;
-              break;
-            } else {
-              console.warn(`[Zalo→TG] Quote msgId=${globalId} maps to thread ${_quoteData.zaloId} but current thread is ${zaloId} — ignoring stale cross-group mapping`);
-            }
-          }
-          // Fallback: messages we sent from TG to Zalo (reverse lookup), also validate thread
-          const _sentTg = sentMsgStore.getByZaloMsgId(globalId);
-          if (_sentTg !== undefined) {
-            const _sentInfo = sentMsgStore.get(_sentTg);
-            if (!_sentInfo || _sentInfo.zaloId === zaloId) {
-              tgReplyMsgId = _sentTg;
-              break;
-            }
-          }
-        }
+        const globalId = String(msg.data.quote.globalMsgId);
+        // Primary: messages received from Zalo and forwarded to TG
+        // Fallback: messages we sent from TG to Zalo (reverse lookup)
+        tgReplyMsgId = msgStore.getTgMsgId(globalId) ?? sentMsgStore.getByZaloMsgId(globalId);
       }
 
       // Base TG send options (with optional reply_parameters)
       const tgBase: {
         message_thread_id: number;
         reply_parameters?: { message_id: number; allow_sending_without_reply: boolean };
-        disable_notification?: boolean;
       } = { message_thread_id: topicId };
       if (tgReplyMsgId !== undefined) {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
-      if (silent) tgBase.disable_notification = true;
 
-      const caption = groupCaption(bridgeSenderName);
+      const caption = groupCaption(senderName);
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
-      // Build quote data + mapping helper — saved after every successful TG send
-      const zaloMsgIds = [
-        msg.data.msgId,
-        ...(msg.data.realMsgId && msg.data.realMsgId !== msg.data.msgId ? [msg.data.realMsgId] : []),
-        ...(msg.data.cliMsgId && msg.data.cliMsgId !== msg.data.msgId ? [msg.data.cliMsgId] : []),
-      ];
+      // Build quote data + mapping helper â€” saved after every successful TG send
+      const zaloMsgIds = msg.data.realMsgId && msg.data.realMsgId !== msg.data.msgId
+        ? [msg.data.msgId, msg.data.realMsgId]
+        : [msg.data.msgId];
       const zaloQuoteData: ZaloQuoteData = {
         msgId:    msg.data.msgId,
         cliMsgId: msg.data.cliMsgId ?? '',
-        uidFrom:  senderUid,
+        uidFrom:  msg.data.uidFrom,
         ts:       msg.data.ts,
         msgType:  msgType,
-        // For text messages (content is a plain string), keep it as-is so zca-js
-        // can send it as qmsg. For media messages (photo, video, etc.), store the
-        // parsed object so prepareQMSGAttach builds a correct thumbnail reference
-        // (thumb/href fields) instead of receiving a raw JSON string.
-        content:  text !== null
-          ? (msg.data.content as string)
-          : (media as Record<string, unknown>),
+        content:  msg.data.content as string | Record<string, unknown>,
         ttl:      msg.data.ttl ?? 0,
         zaloId,
         threadType: type,
@@ -990,244 +455,166 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         msgStore.save(sent.message_id, zaloMsgIds, zaloQuoteData);
       };
 
-      // ── 1. Plain text / rich text ─────────────────────────────────────────
+      const { text, media } = parseContent(msg.data.content);
+
+      const maybeAutoRepostSocialVideo = (rawUrl: string | undefined, source: string) => {
+        if (!rawUrl || !canAutoRepostSocialVideoTopic(topicId)) return;
+        const videoUrl = extractSocialVideoUrl(rawUrl);
+        if (!videoUrl) return;
+        const job = createDurableSocialVideoJob({
+          source: 'zalo',
+          target: 'telegram',
+          sourceMessageId: String(msg.data.realMsgId ?? msg.data.msgId),
+          topicId,
+          text: rawUrl,
+          url: videoUrl,
+          zaloId,
+          threadType: type,
+        });
+        enqueueDurableZaloSocialVideoJob(job, tgOpts, saveTgMapping);
+      };
+
+      // â”€â”€ 1. Plain text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.TEXT || (text !== null)) {
-        // Zalo rich-text messages still use msgType "webchat", but content is
-        // an object like { title, action: "rtf", params: "{styles:...}" }.
-        // Without using media.title here, formatted announcements silently drop.
-        const body = text
-          ?? ((typeof msg.data.content === 'string' ? msg.data.content : '')
-            || media.title
-            || '');
+        const body = text ?? (typeof msg.data.content === 'string' ? msg.data.content : '');
         if (!body.trim()) return;
-        const mentions = msg.data.mentions;
-
-        // Parse Zalo text-style metadata (bold, italic, underline, strike).
-        // Rich text may store styles in msg.data.textProperties OR media.params.
-        let styles: ZaloStyle[] | undefined;
-        for (const rawProps of [
-          (msg.data as unknown as Record<string, unknown>).textProperties,
-          media.params,
-        ]) {
-          try {
-            if (typeof rawProps === 'string' && rawProps) {
-              const parsed = JSON.parse(rawProps) as { styles?: ZaloStyle[] };
-              if (Array.isArray(parsed.styles) && parsed.styles.length > 0) {
-                styles = parsed.styles;
-                break;
-              }
-            }
-          } catch { /* ignore malformed style metadata */ }
+        if (msg.isSelf && sentMsgStore.consumePendingSelf(zaloId, type, body)) {
+          console.log('[Zalo?TG] Skipped TG-origin self echo msgId=' + msg.data.msgId);
+          return;
         }
-
-        const safeBody = truncate(body);
-        const safeStyles = styles
-          ?.filter(s => s.start < safeBody.length)
-          .map(s => ({ ...s, len: Math.min(s.len, safeBody.length - s.start) }));
-        const safeMentions = mentions
-          ?.filter(m => m.pos < safeBody.length)
-          .map(m => {
-            const len = Math.min(m.len, safeBody.length - m.pos);
-            const contactName = m.type === 0
-              ? (friendsCache.get(m.uid)?.alias?.trim()
-                || friendsCache.get(m.uid)?.displayName?.trim()
-                || aliasCache.get(m.uid)?.trim())
-              : undefined;
-            return {
-              ...m,
-              len,
-              label: contactName ? `@${contactName}` : undefined,
-            };
-          });
-        const bodyHtml = (safeMentions?.length || safeStyles?.length)
-          ? applyZaloMarkupHtml(safeBody, safeMentions, safeStyles)
-          : escapeHtml(safeBody);
-        const tgText = formatGroupMsgHtml(bridgeSenderName, bodyHtml);
-        const sent = await tg.sendMessage(
+        const mentions = msg.data.mentions;
+        const bodyHtml = mentions?.length
+          ? applyMentionsHtml(truncate(body), mentions)
+          : escapeHtml(truncate(body));
+        const tgText = formatGroupMsgHtml(senderName, bodyHtml);
+        const sent = await tgBot.telegram.sendMessage(
           config.telegram.groupId,
           tgText,
           { ...tgBase, parse_mode: 'HTML' },
         );
         saveTgMapping(sent);
+        console.log(`[Zalo?TG] Text sent OK msgId=${msg.data.msgId} tgMsgId=${sent.message_id}`);
+        markHealth({ status: 'ok', lastZaloToTgSuccessAt: new Date().toISOString() });
+
+        maybeAutoRepostSocialVideo(body, 'text');
         return;
       }
 
-      // ── 2. Photo / Image ───────────────────────────────────────────────────
+      // â”€â”€ 2. Photo / Image â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.PHOTO) {
-        // Prefer HD, but retain normal/thumb variants because individual Zalo
-        // CDN URLs can expire independently.
-        let hdUrl: string | undefined;
+        // prefer HD from params, fall back to href
+        let url = media.href;
         if (media.params) {
           try {
             const p = JSON.parse(media.params) as { hd?: string };
-            if (p.hd) hdUrl = p.hd;
+            if (p.hd) url = p.hd;
           } catch { /* ignore */ }
         }
-        const photoUrls = Array.from(new Set(
-          [hdUrl, media.href, media.thumb]
-            .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0)
-            .map(candidate => candidate.trim()),
-        ));
-        const url = photoUrls[0];
         if (!url) { console.warn('[ZaloHandler] Photo: no URL found in content:', media); return; }
 
-        // Caption attached to the photo by the sender (Zalo stores it in the `title` field)
-        const photoCaption = media.title?.trim() || undefined;
+        // Caption attached to the photo by the sender (Zalo stores it in description)
+        const photoCaption = media.description?.trim() || undefined;
 
         const childnumber: number = (media as { childnumber?: number }).childnumber ?? 0;
-        const albumKey = `${zaloId}:${senderUid}`;
+        const albumKey = `${zaloId}:${msg.data.uidFrom}`;
 
-        console.log(`[ZaloHandler] Photo: msgId=${msg.data.msgId} childnumber=${childnumber} group=${type === 1} url=${url.substring(0, 80)}...`);
-
-        // If childnumber > 0 OR there's already a buffer for this key → album mode
-        // (detected via the add callback which reuses or creates the buffer)
+        // If childnumber > 0 OR there's already a buffer for this key â†’ album mode
+        const hasBuffer = (typeof zaloAlbumStore as unknown as { _has?: (k: string) => boolean })._has?.(albumKey);
+        void hasBuffer; // unused, we detect via the add callback
 
         zaloAlbumStore.add(
           albumKey,
           url,
-          zaloMsgIds,
-          photoCaption,
-          { senderName: bridgeSenderName, topicId, tgBase, zaloQuote: zaloQuoteData },
+          zaloMsgIds[0],
+          { senderName, topicId, tgBase, zaloQuote: zaloQuoteData },
           async (buf) => {
-            if (buf.items.length === 1) {
-              // Single photo
-              const item = buf.items[0]!;
-              let localPath: string;
+            if (buf.urls.length === 1) {
+              // Single photo â€” send normally
+              const singleUrl = buf.urls[0]!;
+              const localPath = await downloadToTemp(singleUrl, `photo_${Date.now()}.jpg`);
+              const stream = createReadStream(localPath);
               try {
-                localPath = await downloadToTempFromCandidates(
-                  [item.url, ...item.fallbackUrls],
-                  `photo_${Date.now()}.jpg`,
+                const sent = await tgBot.telegram.sendPhoto(
+                  config.telegram.groupId,
+                  { source: stream },
+                  {
+                    ...buf.tgBase,
+                    parse_mode: 'HTML' as const,
+                    caption: photoCaption
+                      ? `${groupCaption(buf.senderName)}
+${escapeHtml(photoCaption)}`
+                      : groupCaption(buf.senderName),
+                  },
                 );
-              } catch (dlErr) {
-                console.warn('[ZaloHandler] Photo download failed after retries:', dlErr);
-                await tg.sendMessage(config.telegram.groupId,
-                  `${groupCaption(buf.senderName)}\n⚠️ <i>Không thể tải ảnh từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-                  { ...buf.tgBase, parse_mode: 'HTML' })
-                  .catch(notifyErr => console.error('[ZaloHandler] Failed to send photo-download-failure notice:', notifyErr));
-                return;
-              }
-              try {
-                const sent = await withLocalMediaFallback(
-                  forceMultipart => tg.sendPhoto(
-                    config.telegram.groupId,
-                    telegramMediaFile(localPath, forceMultipart),
-                    {
-                      ...buf.tgBase,
-                      parse_mode: 'HTML' as const,
-                      caption: buf.caption
-                        ? `${groupCaption(buf.senderName)}\n${escapeHtml(buf.caption)}`
-                        : groupCaption(buf.senderName),
-                    },
-                  ),
-                  'Photo upload',
-                );
-                // Use buf.zaloQuote which already has the correct cliMsgId and
-                // parsed media content object (not raw JSON string).
-                msgStore.save(sent.message_id, buf.items[0]!.msgIds, buf.items[0]!.zaloQuote!);
-                console.log(`[Zalo→TG] Photo sent: topic=${buf.topicId} msgId=${sent.message_id}`);
+                markHealth({ status: 'ok', lastZaloToTgSuccessAt: new Date().toISOString() });
+                msgStore.save(sent.message_id, buf.zaloMsgIds, {
+                  msgId: buf.zaloMsgIds[0]!,
+                  cliMsgId: '',
+                  uidFrom: msg.data.uidFrom,
+                  ts: msg.data.ts,
+                  msgType,
+                  content: msg.data.content as string | Record<string, unknown>,
+                  ttl: msg.data.ttl ?? 0,
+                  zaloId,
+                  threadType: type,
+                });
               } finally { await cleanTemp(localPath); }
             } else {
-              // Multi-photo album — cap concurrent downloads to avoid exhausting
-              // the OS TCP connection pool (unbounded Promise.allSettled on large
-              // albums causes ETIMEDOUT on later connections against Zalo's CDN).
+              // Multi-photo album â€” download all and send as media group
               const localPaths: string[] = [];
               try {
-                const dlTasks = buf.items.map(item =>
-                  () => downloadToTempFromCandidates(
-                    [item.url, ...item.fallbackUrls],
-                    `photo_${Date.now()}.jpg`,
-                  ));
-                const dlResults = await runWithConcurrency(dlTasks, 4); // max 4 simultaneous HTTPS connections
-                const downloaded = dlResults.flatMap((r, index) => {
-                  if (r.status === 'fulfilled') return [{ localPath: r.value, item: buf.items[index]! }];
-                  console.warn('[ZaloHandler] Album: skipping failed photo download:', r.reason);
-                  return [];
-                });
-                if (downloaded.length === 0) {
-                  console.warn(`[ZaloHandler] Album: all ${buf.items.length} photo download(s) failed — notifying user`);
-                  await tg.sendMessage(config.telegram.groupId,
-                    `${groupCaption(buf.senderName)}\n⚠️ <i>Không thể tải ${buf.items.length} ảnh từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-                    { ...buf.tgBase, parse_mode: 'HTML' })
-                    .catch(notifyErr => console.error('[ZaloHandler] Failed to send album-download-failure notice:', notifyErr));
-                  return;
+                for (const u of buf.urls) {
+                  localPaths.push(await downloadToTemp(u, `photo_${Date.now()}.jpg`));
                 }
-                localPaths.push(...downloaded.map(d => d.localPath));
-                const captionText = buf.caption
-                  ? `${groupCaption(buf.senderName)}\n${escapeHtml(buf.caption)}`
+                const captionText = photoCaption
+                  ? `${groupCaption(buf.senderName)}
+${escapeHtml(photoCaption)}`
                   : groupCaption(buf.senderName);
-                // Telegram limits media groups to 10 items — split into batches
-                const allSentMsgs: { message_id: number }[] = [];
-                const batches = telegramMediaBatches(localPaths, 10);
-                let downloadedOffset = 0;
-                for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-                  const batch = batches[batchIndex]!;
-                  const isFirstBatch = batchIndex === 0;
-                  if (batch.length === 1) {
-                    const sent = await withLocalMediaFallback(
-                      forceMultipart => tg.sendPhoto(
-                        config.telegram.groupId,
-                        telegramMediaFile(batch[0]!, forceMultipart),
-                        {
-                          ...buf.tgBase,
-                          ...(isFirstBatch && captionText
-                            ? { caption: captionText, parse_mode: 'HTML' as const }
-                            : {}),
-                        },
-                      ),
-                      'Photo upload',
-                    );
-                    allSentMsgs.push(sent);
-                  } else {
-                    const sentMsgs = await withLocalMediaFallback(
-                      forceMultipart => {
-                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        const mediaItems: any[] = batch.map((lp, j) => ({
-                          type: 'photo',
-                          media: telegramMediaFile(lp, forceMultipart),
-                          ...(isFirstBatch && j === 0 && captionText ? { caption: captionText, parse_mode: 'HTML' } : {}),
-                        }));
-                        return tg.sendMediaGroup(
-                          config.telegram.groupId,
-                          mediaItems,
-                          { ...buf.tgBase, message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
-                        );
-                      },
-                      'Photo album upload',
-                    );
-                    allSentMsgs.push(...sentMsgs);
-                  }
-
-                  // Persist each successful batch immediately. If a later batch
-                  // fails, replies to the already-delivered photos still map to
-                  // the right Zalo messages.
-                  const sentBatch = allSentMsgs.slice(downloadedOffset);
-                  for (let i = 0; i < sentBatch.length && i < batch.length; i++) {
-                    const item = downloaded[downloadedOffset + i]!.item;
-                    msgStore.save(sentBatch[i]!.message_id, item.msgIds, item.zaloQuote!);
-                  }
-                  downloadedOffset += batch.length;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const mediaItems: any[] = localPaths.map((lp, i) => ({
+                  type: 'photo',
+                  media: { source: createReadStream(lp) },
+                  ...(i === 0 && captionText ? { caption: captionText, parse_mode: 'HTML' } : {}),
+                }));
+                const sentMsgs = await tgBot.telegram.sendMediaGroup(
+                  config.telegram.groupId,
+                  mediaItems,
+                  { message_thread_id: buf.topicId } as Parameters<typeof tgBot.telegram.sendMediaGroup>[2],
+                );
+                // Save mapping for first photo (for reply chain)
+                if (sentMsgs.length > 0) {
+                  msgStore.save(sentMsgs[0]!.message_id, buf.zaloMsgIds, {
+                    msgId: buf.zaloMsgIds[0]!,
+                    cliMsgId: '',
+                    uidFrom: msg.data.uidFrom,
+                    ts: msg.data.ts,
+                    msgType,
+                    content: msg.data.content as string | Record<string, unknown>,
+                    ttl: msg.data.ttl ?? 0,
+                    zaloId,
+                    threadType: type,
+                  });
                 }
-                console.log(`[Zalo→TG] Photo album sent: topic=${buf.topicId} photos=${allSentMsgs.length}`);
               } finally {
                 for (const lp of localPaths) await cleanTemp(lp);
               }
             }
           },
-          childnumber,
-          photoUrls.slice(1),
         );
 
+        // Peek: if childnumber === 0 and no existing buffer, timer fires immediately
+        // (actually always deferred 600ms â€” that's fine)
         return;
       }
 
-      // ── 2b. Doodle (sketch/drawing) ────────────────────────────────────────
+      // â”€â”€ 2b. Doodle (sketch/drawing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.DOODLE) {
         const url = media.href || media.thumb;
         if (!url) { console.warn('[ZaloHandler] Doodle: no URL'); return; }
         const localPath = await downloadToTemp(url, `doodle_${Date.now()}.jpg`);
         const stream = createReadStream(localPath);
         try {
-          const sent = await tg.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
+          const sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
         } finally { await cleanTemp(localPath); }
         return;
@@ -1235,36 +622,26 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
 
       if (msgType === ZALO_MSG_TYPES.GIF) {
-        const url = media.href || media.thumb;
+        const url = media.href;
         if (!url) {
           console.warn('[ZaloHandler] GIF: no URL found in content:', media);
           return;
         }
         const ext = path.extname(url.split('?')[0] ?? '').toLowerCase() || '.mp4';
-        let localPath: string;
+        const localPath = await downloadToTemp(url, `gif_${Date.now()}${ext}`);
+        const stream = createReadStream(localPath);
         try {
-          localPath = await (earlyDlPromise ?? downloadToTemp(url, `gif_${Date.now()}${ext}`));
-        } catch (dlErr) {
-          console.warn('[ZaloHandler] GIF download failed after retries:', dlErr);
-          await tg.sendMessage(config.telegram.groupId,
-            `${caption}\n⚠️ <i>Không thể tải GIF từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-            { ...tgBase, parse_mode: 'HTML' })
-            .catch(notifyErr => console.error('[ZaloHandler] Failed to send GIF-download-failure notice:', notifyErr));
-          return;
-        }
-        try {
-          const sent = await sendAnimationWithFallback(
-            localPath,
+          const sent = await tgBot.telegram.sendAnimation(
+            config.telegram.groupId,
+            { source: stream },
             tgOpts,
-            `zalo_gif${ext}`,
           );
           saveTgMapping(sent);
-          console.log(`[Zalo→TG] GIF sent: topic=${topicId} msgId=${sent.message_id}`);
         } finally { await cleanTemp(localPath); }
         return;
       }
 
-      // ── 4. File ────────────────────────────────────────────────────────────
+      // â”€â”€ 4. File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.FILE) {
         const url = media.href;
         // title holds the original filename (e.g. "report.pdf")
@@ -1273,22 +650,12 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           console.warn('[ZaloHandler] File: no URL found in content:', media);
           return;
         }
-        let localPath: string;
-        try {
-          localPath = await (earlyDlPromise ?? downloadToTemp(url, fileName));
-        } catch (dlErr) {
-          console.warn(`[ZaloHandler] File download failed after retries: ${fileName}`, dlErr);
-          await tg.sendMessage(config.telegram.groupId,
-            `${caption}\n⚠️ <i>Không thể tải file <b>${escapeHtml(fileName)}</b> từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-            { ...tgBase, parse_mode: 'HTML' })
-            .catch(notifyErr => console.error('[ZaloHandler] Failed to send file-download-failure notice:', notifyErr));
-          return;
-        }
+        const localPath = await downloadToTemp(url, fileName);
         const stream = createReadStream(localPath);
         try {
-          const sent = await tg.sendDocument(
+          const sent = await tgBot.telegram.sendDocument(
             config.telegram.groupId,
-            { source: stream, filename: sanitizeFileName(fileName) },
+            { source: stream, filename: fileName },
             tgOpts,
           );
           saveTgMapping(sent);
@@ -1296,213 +663,123 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return;
       }
 
-      // ── 5. Video ───────────────────────────────────────────────────────────
+      // â”€â”€ 5. Video â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.VIDEO) {
-        const url = media.href;
-        if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', media); return; }
-        let localPath: string;
+        const url = pickMediaUrl(media);
+        if (!url) { console.warn('[ZaloHandler] Video: no URL found in content:', shortContent(msg.data.content)); return; }
+        const downloadedPath = await downloadToTemp(url, `video_${Date.now()}.mp4`);
+        let localPaths: string[] = [];
         try {
-          localPath = await (earlyDlPromise ?? downloadToTemp(url, `video_${Date.now()}.mp4`));
-        } catch (dlErr) {
-          console.warn('[ZaloHandler] Video download failed after retries:', dlErr);
-          await tg.sendMessage(config.telegram.groupId,
-            `${caption}\n⚠️ <i>Không thể tải video từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-            { ...tgBase, parse_mode: 'HTML' })
-            .catch(notifyErr => console.error('[ZaloHandler] Failed to send video-download-failure notice:', notifyErr));
-          return;
+          localPaths = await prepareTelegramVideoPaths([downloadedPath]);
+          for (let i = 0; i < localPaths.length; i++) {
+            const partPath = localPaths[i]!;
+            const videoInfo = await getVideoInfo(partPath).catch(() => ({ durationMs: 30_000, width: 720, height: 1280 }));
+            const partCaption = localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined;
+            const sent = await tgBot.telegram.sendVideo(config.telegram.groupId, { source: createReadStream(partPath) }, { ...tgOpts, ...(partCaption ? { caption: partCaption } : {}), duration: Math.round(videoInfo.durationMs / 1000), width: videoInfo.width, height: videoInfo.height });
+            saveTgMapping(sent);
+            console.log(`[Zalo→TG] Video sent part ${i + 1}/${localPaths.length} OK msgId=${sent.message_id}`);
+          }
+        } finally {
+          for (const p of new Set([downloadedPath, ...localPaths])) await cleanTemp(p);
         }
-        const stream = createReadStream(localPath);
-        try {
-          const sent = await tg.sendVideo(config.telegram.groupId, { source: stream }, tgOpts);
-          saveTgMapping(sent);
-        } finally { await cleanTemp(localPath); }
         return;
       }
 
-      // ── 6. Voice ───────────────────────────────────────────────────────────
+      // â”€â”€ 6. Voice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.VOICE) {
         const url = media.href;
         if (!url) { console.warn('[ZaloHandler] Voice: no URL found in content:', media); return; }
         const ext = path.extname(url.split('?')[0] ?? '').toLowerCase() || '.m4a';
-        let localPath: string;
-        try {
-          localPath = await (earlyDlPromise ?? downloadToTemp(url, `voice_${Date.now()}${ext}`));
-        } catch (dlErr) {
-          console.warn('[ZaloHandler] Voice download failed after retries:', dlErr);
-          await tg.sendMessage(config.telegram.groupId,
-            `${caption}\n⚠️ <i>Không thể tải tin nhắn thoại từ Zalo (lỗi mạng). Vui lòng yêu cầu gửi lại.</i>`,
-            { ...tgBase, parse_mode: 'HTML' })
-            .catch(notifyErr => console.error('[ZaloHandler] Failed to send voice-download-failure notice:', notifyErr));
-          return;
-        }
+        const localPath = await downloadToTemp(url, `voice_${Date.now()}${ext}`);
         const stream = createReadStream(localPath);
         try {
-          const sent = await tg.sendVoice(config.telegram.groupId, { source: stream }, tgOpts);
+          const sent = await tgBot.telegram.sendVoice(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
 
-      // ── 7. Sticker – fetch real URL via getStickersDetail ──────────────────
+      // â”€â”€ 7. Sticker â€“ fetch real URL via getStickersDetail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.STICKER) {
-        const stickerId = Number(media.id);
-        if (!Number.isFinite(stickerId) || stickerId <= 0) {
+        const stickerId = media.id;
+        if (!stickerId) {
           console.warn('[ZaloHandler] Sticker: no id in content:', media);
           return;
         }
-
-        const sendPlaceholder = async (reason: string): Promise<void> => {
-          const sent = await tg.sendMessage(
-            config.telegram.groupId,
-            `${groupCaption(bridgeSenderName)}\n🧩 <i>Sticker Zalo #${stickerId}</i>`,
-            { ...tgBase, parse_mode: 'HTML' },
-          );
-          saveTgMapping(sent);
-          console.warn(`[ZaloHandler] Sticker #${stickerId} forwarded as placeholder: ${reason}`);
-        };
-
         try {
-          let detail: Awaited<ReturnType<typeof api.getStickersDetail>>[number] | undefined =
-            (await api.getStickersDetail(stickerId))[0];
-          const cateId = Number(media.cateId ?? media.catId);
-          if (!detail && Number.isFinite(cateId) && cateId > 0) {
-            // getStickersDetail() swallows individual request failures and can
-            // return []; the category endpoint is a reliable second source.
-            const category = await api.getStickerCategoryDetail(cateId);
-            detail = category.find(item => Number(item.id) === stickerId);
-          }
-
-          if (!detail) {
-            await sendPlaceholder('sticker detail API returned no data');
-            return;
-          }
-
-          const isAnimated = Boolean(detail.stickerSpriteUrl && Number(detail.totalFrames) > 1);
-          if (isAnimated) {
-            let spritePath: string | undefined;
-            let gifPath: string | undefined;
-            try {
-              spritePath = await downloadToTemp(
-                detail.stickerSpriteUrl,
-                `sticker_sprite_${Date.now()}.png`,
-              );
-              gifPath = await convertSpriteSheetToGif(
-                spritePath,
-                Number(detail.totalFrames),
-                Number(detail.duration),
-              );
-              const sent = await sendAnimationWithFallback(
-                gifPath,
-                {
-                  ...tgBase,
-                  caption: `${groupCaption(bridgeSenderName)} <i>(sticker động)</i>`,
-                  parse_mode: 'HTML',
-                },
-                `zalo_sticker_${stickerId}.gif`,
-              );
-              saveTgMapping(sent);
-              console.log(`[Zalo→TG] Animated sticker sent: stickerId=${stickerId} frames=${detail.totalFrames} msgId=${sent.message_id}`);
-              return;
-            } catch (animatedErr) {
-              console.warn(`[ZaloHandler] Animated sticker #${stickerId} conversion failed; using static frame:`, animatedErr);
-            } finally {
-              if (gifPath) await cleanTemp(gifPath);
-              if (spritePath) await cleanTemp(spritePath);
-            }
-          }
-
-          const url = detail.stickerWebpUrl || detail.stickerUrl || detail.stickerSpriteUrl;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const details: any[] = await api.getStickersDetail([stickerId]);
+          const detail = details?.[0];
+          const url: string | undefined =
+            detail?.stickerWebpUrl ?? detail?.stickerUrl ?? detail?.stickerSpriteUrl;
           if (!url) {
-            await sendPlaceholder('sticker detail has no media URL');
+            console.warn('[ZaloHandler] Sticker: no URL in detail:', detail);
             return;
           }
-          const ext = path.extname(new URL(url).pathname).toLowerCase() || '.png';
+          const ext = path.extname(url.split('?')[0] ?? '').toLowerCase() || '.webp';
           const localPath = await downloadToTemp(url, `sticker_${Date.now()}${ext}`);
           try {
             let sent: { message_id: number };
+            let nativeSticker = false;
             try {
-              sent = await withLocalMediaFallback(
-                forceMultipart => tg.sendSticker(
-                  config.telegram.groupId,
-                  telegramMediaFile(localPath, forceMultipart),
-                  tgBase as Parameters<typeof tg.sendSticker>[2],
-                ),
-                'Sticker upload',
+              // Try native TG sticker (webp â‰¤512 KB displays as a proper sticker)
+              const stream = createReadStream(localPath);
+              sent = await tgBot.telegram.sendSticker(
+                config.telegram.groupId,
+                { source: stream },
+                tgBase as Parameters<typeof tgBot.telegram.sendSticker>[2],
               );
-            } catch (stickerErr) {
-              console.warn(`[ZaloHandler] Native sticker #${stickerId} rejected; sending as photo:`, stickerErr);
-              try {
-                sent = await withLocalMediaFallback(
-                  forceMultipart => tg.sendPhoto(
-                    config.telegram.groupId,
-                    telegramMediaFile(localPath, forceMultipart),
-                    tgOpts,
-                  ),
-                  'Sticker photo fallback',
-                );
-              } catch (photoErr) {
-                console.warn(`[ZaloHandler] Sticker photo #${stickerId} rejected; sending as document:`, photoErr);
-                sent = await withLocalMediaFallback(
-                  forceMultipart => tg.sendDocument(
-                    config.telegram.groupId,
-                    forceMultipart
-                      ? { source: createReadStream(localPath), filename: `zalo_sticker_${stickerId}${ext}` }
-                      : telegramMediaFile(localPath, false),
-                    tgOpts as Parameters<typeof tg.sendDocument>[2],
-                  ),
-                  'Sticker document fallback',
-                );
-              }
+              nativeSticker = true;
+            } catch {
+              // Fall back to photo if file is too large or format unsupported
+              const stream = createReadStream(localPath);
+              sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
             }
             saveTgMapping(sent);
-            console.log(`[Zalo→TG] Sticker sent: stickerId=${stickerId} msgId=${sent.message_id}`);
-          } finally {
-            await cleanTemp(localPath);
-          }
+            if (nativeSticker) {
+              try {
+                await tgBot.telegram.sendMessage(
+                  config.telegram.groupId,
+                  groupCaption(senderName),
+                  { ...tgBase, parse_mode: 'HTML' },
+                );
+              } catch (labelErr) {
+                console.warn('[ZaloHandler] Sticker sender label failed:', labelErr);
+              }
+            }
+          } finally { await cleanTemp(localPath); }
         } catch (stickerErr) {
           console.error('[ZaloHandler] Sticker fetch error:', stickerErr);
-          await sendPlaceholder(telegramErrorDescription(stickerErr)).catch(placeholderErr => {
-            console.error('[ZaloHandler] Sticker placeholder failed:', placeholderErr);
-          });
         }
         return;
       }
 
-      // ── 8. Link (chat.recommended) ─────────────────────────────────────────
+      // Link
       if (msgType === ZALO_MSG_TYPES.LINK) {
-        // ── Missed call notification ──────────────────────────────────────────
-        const rawMedia = media as Record<string, unknown>;
-        if (media.action === 'recommened.misscall') {
-          let params: { duration?: number; isCaller?: number; calltype?: number } = {};
-          try { params = JSON.parse(media.params ?? '{}'); } catch { /* ignore */ }
-          const callText = params.calltype === 1 ? '📹 cuộc gọi video nhỡ' : '📞 cuộc gọi thoại nhỡ';
-          const sent = await tg.sendMessage(config.telegram.groupId, callText, tgBase);
-          saveTgMapping(sent);
-          return;
-        }
-        const href = media.href
-          || (typeof rawMedia['src']  === 'string' ? rawMedia['src']  : '')
-          || (typeof rawMedia['msg']  === 'string' ? rawMedia['msg']  : '')
-          || '';
-        const title = media.title
-          || (typeof rawMedia['desc'] === 'string' ? rawMedia['desc'] : '')
-          || href;
+        const rawContent = typeof msg.data.content === 'string'
+          ? msg.data.content
+          : JSON.stringify(msg.data.content);
+        const socialHref = extractSocialVideoUrl(rawContent);
+        const href  = pickMediaUrl(media) ?? socialHref;
+        const title = media.title ?? href;
         if (!href) {
-          console.warn('[ZaloHandler] Link: no URL found in content:', JSON.stringify(rawMedia));
+          console.warn(`[ZaloHandler] Link: no URL msgId=${msg.data.msgId} content=${shortContent(msg.data.content)}`);
           return;
         }
-        const safeTitle = escapeHtml(title);
-        const linkText  = `${groupCaption(bridgeSenderName)}\n<a href="${href}">${safeTitle}</a>`;
-        const sent = await tg.sendMessage(config.telegram.groupId, linkText, {
+        const safeHref = escapeHtml(href);
+        const safeTitle = escapeHtml(title ?? href);
+        const linkText = `${groupCaption(senderName)}\n<a href="${safeHref}">${safeTitle}</a>\n${safeHref}`;
+        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, linkText, {
           ...tgBase,
           parse_mode: 'HTML',
           link_preview_options: { is_disabled: false },
         });
         saveTgMapping(sent);
+        maybeAutoRepostSocialVideo(socialHref ?? href, 'link');
         return;
       }
 
-      // ── 9. Web content (Zalo instant: bank card, mini app, etc.) ──────────
+      // Web content (Zalo instant: bank card, mini app, etc.)
       if (msgType === ZALO_MSG_TYPES.WEBCONTENT) {
         // For bank cards: fetch HTML, parse data, send QR image + caption
         if (media.action === 'zinstant.bankcard' && media.params) {
@@ -1521,12 +798,12 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
                   width: 300, margin: 2,
                   color: { dark: '#000000ff', light: '#ffffffff' },
                 });
-                let caption = `🏦 <b>Tài khoản ngân hàng</b>`;
-                if (info.bankName)      caption += `\nNgân hàng: <b>${info.bankName}</b>`;
+                let caption = `ðŸ¦ <b>TÃ i khoáº£n ngÃ¢n hÃ ng</b>`;
+                if (info.bankName)      caption += `\nNgÃ¢n hÃ ng: <b>${info.bankName}</b>`;
                 if (info.accountNumber) caption += `\nSTK: <code>${info.accountNumber}</code>`;
-                if (info.holderName)    caption += `\nChủ TK: <b>${info.holderName}</b>`;
-                const fullCaption = `${groupCaption(bridgeSenderName)}\n${caption}`;
-                const sent = await tg.sendPhoto(
+                if (info.holderName)    caption += `\nChá»§ TK: <b>${info.holderName}</b>`;
+                const fullCaption = `${groupCaption(senderName)}\n${caption}`;
+                const sent = await tgBot.telegram.sendPhoto(
                   config.telegram.groupId,
                   { source: qrBuf },
                   { ...tgBase, caption: fullCaption, parse_mode: 'HTML' },
@@ -1553,26 +830,111 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
             else if (en && en.trim()) label = en.trim();
           }
         } catch { /* use fallback */ }
-        if (!label) label = '[Nội dung web]';
+        if (!label) label = '[Ná»™i dung web]';
 
         const ACTION_ICONS: Record<string, string> = {
-          'zinstant.bankcard': '🏦',
-          'zinstant.transfer': '💸',
-          'zinstant.invoice':  '🧾',
-          'zinstant.qr':       '📷',
+          'zinstant.bankcard': 'ðŸ¦',
+          'zinstant.transfer': 'ðŸ’¸',
+          'zinstant.invoice':  'ðŸ§¾',
+          'zinstant.qr':       'ðŸ“·',
         };
         const icon = ACTION_ICONS[media.action ?? ''] ?? '📋';
-        const body = `${icon} ${label}`;
-        const text = `${groupCaption(bridgeSenderName)}\n${body}`;
-        const sent = await tg.sendMessage(config.telegram.groupId, text, {
+        const href = media.href;
+        if (!href) console.warn('[ZaloHandler] Webcontent has no href:', JSON.stringify({ action: media.action, title: media.title, params: media.params?.slice(0, 300) }));
+
+        const meta = href ? await fetchLinkMeta(href) : null;
+        const finalUrl = meta?.finalUrl ?? href;
+        const displayTitle = meta?.title || label;
+        const description = meta?.description;
+        const lines = [
+          `${icon} ${escapeHtml(displayTitle)}`,
+          description ? escapeHtml(truncate(description, 500)) : undefined,
+          finalUrl ? escapeHtml(finalUrl) : undefined,
+        ].filter((v): v is string => Boolean(v));
+        const caption = `${groupCaption(senderName)}\n${lines.join('\n')}`;
+
+        if (meta?.image) {
+          try {
+            const localPath = await downloadToTemp(meta.image, `link_thumb_${Date.now()}.jpg`);
+            try {
+              const stream = createReadStream(localPath);
+              const sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, {
+                ...tgBase,
+                caption,
+                parse_mode: 'HTML',
+              });
+              saveTgMapping(sent);
+              return;
+            } finally { await cleanTemp(localPath); }
+          } catch (err) {
+            console.warn('[ZaloHandler] link thumbnail send failed:', err);
+          }
+        }
+
+        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, caption, {
           ...tgBase,
           parse_mode: 'HTML',
+          link_preview_options: { is_disabled: false },
+        });
+        saveTgMapping(sent);
+        maybeAutoRepostSocialVideo(
+          extractSocialVideoUrl([
+            href,
+            media.description,
+            media.params,
+          ].filter((value): value is string => Boolean(value)).join('\n')),
+          'webcontent',
+        );
+        return;
+      }
+
+      // â”€â”€ 10. Location â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      if (msgType === ZALO_MSG_TYPES.ECARD) {
+        let params: Record<string, unknown> | undefined;
+        try { params = media.params ? JSON.parse(media.params) as Record<string, unknown> : undefined; }
+        catch { params = undefined; }
+
+        const actionId = typeof params?.actionId === 'string' ? params.actionId : '';
+        const isReminder = actionId.includes('reminder') || media.action === 'show.profile';
+        const icon = isReminder ? '??' : '??';
+        const title = media.title || (typeof params?.notifyTxt === 'string' ? params.notifyTxt : undefined) || 'Zalo card';
+        const description = media.description || (typeof params?.previewTxt === 'string' ? params.previewTxt : undefined);
+        const href = media.href;
+        const lines = [
+          `${icon} ${escapeHtml(title)}`,
+          description ? escapeHtml(description) : undefined,
+          href ? escapeHtml(href) : undefined,
+        ].filter((v): v is string => Boolean(v));
+          const caption = `${groupCaption(senderName)}\n${lines.join('\n')}`;
+
+        if (media.thumb || media.href) {
+          const imageUrl = media.thumb || media.href;
+          try {
+            const localPath = await downloadToTemp(imageUrl!, `ecard_${Date.now()}.jpg`);
+            try {
+              const stream = createReadStream(localPath);
+              const sent = await tgBot.telegram.sendPhoto(config.telegram.groupId, { source: stream }, {
+                ...tgBase,
+                caption,
+                parse_mode: 'HTML',
+              });
+              saveTgMapping(sent);
+              return;
+            } finally { await cleanTemp(localPath); }
+          } catch (err) {
+            console.warn('[ZaloHandler] ecard thumbnail send failed:', err);
+          }
+        }
+
+        const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, caption, {
+          ...tgBase,
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: false },
         });
         saveTgMapping(sent);
         return;
       }
 
-      // ── 10. Location ───────────────────────────────────────────────────────
       if (msgType === ZALO_MSG_TYPES.LOCATION) {
         let lat: number | undefined;
         let lng: number | undefined;
@@ -1583,32 +945,34 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         } catch { /* ignore */ }
 
         if (lat !== undefined && lng !== undefined) {
-          // Send as native TG location — shows map preview with Maps button
-          const sent = await tg.sendLocation(
+          // Send as native TG location â€” shows map preview with Maps button
+          const sent = await tgBot.telegram.sendLocation(
             config.telegram.groupId,
             lat,
             lng,
-            { ...tgBase } as Parameters<typeof tg.sendLocation>[3],
+            { ...tgBase } as Parameters<typeof tgBot.telegram.sendLocation>[3],
           );
-          // Send sender name as a follow-up caption since sendLocation has no HTML caption
-            await tg.sendMessage(
+          if (type === ThreadType.Group || type === ThreadType.User) {
+            // Send sender name as a follow-up caption since sendLocation has no HTML caption
+            await tgBot.telegram.sendMessage(
               config.telegram.groupId,
-              `${groupCaption(bridgeSenderName)}📍 Vị trí`,
+              `${groupCaption(senderName)}ðŸ“ Vá»‹ trÃ­`,
               { ...tgBase, parse_mode: 'HTML' },
             );
+          }
           saveTgMapping(sent);
         } else {
           // Fallback: Google Maps link
           const mapsUrl = media.href || '#';
-          const body    = `📍 <a href="${mapsUrl}">Vị trí</a>`;
-          const text    = `${groupCaption(bridgeSenderName)}\n${body}`;
-          const sent    = await tg.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
+          const body    = `ðŸ“ <a href="${mapsUrl}">Vá»‹ trÃ­</a>`;
+          const text    = `${groupCaption(senderName)}\n${body}`;
+          const sent    = await tgBot.telegram.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
           saveTgMapping(sent);
         }
         return;
       }
 
-      // ── 11. Poll ────────────────────────────────────────────────────────────
+      // â”€â”€ 11. Poll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msgType === ZALO_MSG_TYPES.POLL) {
         let pollId: number | undefined;
         let question = '';
@@ -1648,19 +1012,19 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           const options: ZaloPollOption[] = pollDetail?.options ?? [];
           if (options.length < 2) {
             // Can't create TG poll with < 2 options, send as text
-            const text = type === ThreadType.Group
-              ? `${groupCaption(bridgeSenderName)}📊 <b>${escapeHtml(question)}</b>\n<i>Cuộc bình chọn mới (${options.length} lựa chọn)</i>`
-              : `📊 <b>${escapeHtml(question)}</b>`;
-            const sent = await tg.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
+            const text = type === ThreadType.Group || type === ThreadType.User
+              ? `${groupCaption(senderName)}ðŸ“Š <b>${escapeHtml(question)}</b>\n<i>Cuá»™c bÃ¬nh chá»n má»›i (${options.length} lá»±a chá»n)</i>`
+              : `ðŸ“Š <b>${escapeHtml(question)}</b>`;
+            const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
             saveTgMapping(sent);
             return;
           }
 
-          const header = type === ThreadType.Group
-            ? `${bridgeSenderName} tạo bình chọn`
-            : 'Bình chọn mới';
+          const header = type === ThreadType.Group || type === ThreadType.User
+            ? `${senderName} táº¡o bÃ¬nh chá»n`
+            : 'BÃ¬nh chá»n má»›i';
 
-          const tgPollMsg = await tg.sendPoll(
+          const tgPollMsg = await tgBot.telegram.sendPoll(
             config.telegram.groupId,
             question,
             options.map(o => o.content),
@@ -1669,15 +1033,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               is_anonymous:        isAnonymous,
               allows_multiple_answers: pollDetail?.allow_multi_choices ?? false,
               question_parse_mode: undefined,
-            } as Parameters<typeof tg.sendPoll>[3],
+            } as Parameters<typeof tgBot.telegram.sendPoll>[3],
           );
 
           // Send editable score message below
           const scoreText = buildScoreText(header, pollDetail?.options ?? [], pollDetail?.closed ?? false);
-          const tgScoreMsg = await tg.sendMessage(
+          const tgScoreMsg = await tgBot.telegram.sendMessage(
             config.telegram.groupId,
             scoreText,
-            { message_thread_id: topicId, parse_mode: 'HTML', disable_notification: silent },
+            { message_thread_id: topicId, parse_mode: 'HTML' },
           );
 
           pollStore.save({
@@ -1691,14 +1055,14 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           });
           saveTgMapping(tgPollMsg);
         } else {
-          // ── Vote update (or unknown existing poll after restart) ──────────
+          // â”€â”€ Vote update (or unknown existing poll after restart) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           // Small delay so Zalo server has time to record the vote before we fetch
           await new Promise(r => setTimeout(r, 800));
           let updatedDetail = pollDetail;
           try { updatedDetail = await api.getPollDetail(pollId); } catch { /* use existing */ }
-          const header = type === ThreadType.Group
-            ? `${bridgeSenderName} vừa bình chọn`
-            : 'Cập nhật bình chọn';
+          const header = type === ThreadType.Group || type === ThreadType.User
+            ? `${senderName} vá»«a bÃ¬nh chá»n`
+            : 'Cáº­p nháº­t bÃ¬nh chá»n';
           const detailOptions = updatedDetail?.options ?? [];
           const scoreText = buildScoreText(
             header,
@@ -1709,7 +1073,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
           if (existingEntry) {
             try {
-              await tg.editMessageText(
+              await tgBot.telegram.editMessageText(
                 config.telegram.groupId,
                 existingEntry.tgScoreMsgId,
                 undefined,
@@ -1718,13 +1082,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
                   parse_mode: 'HTML',
                   reply_markup: updatedDetail?.closed
                     ? { inline_keyboard: [] }
-                    : { inline_keyboard: [[{ text: '🔒 Khoá bình chọn', callback_data: `lock_poll:${pollId}` }]] },
+                    : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] },
                 },
               );
               console.log(`[ZaloHandler] Poll ${pollId} score message edited OK`);
             } catch (editErr) {
               console.warn(`[ZaloHandler] Poll ${pollId} edit failed, sending new:`, editErr);
-              const newScore = await tg.sendMessage(
+              const newScore = await tgBot.telegram.sendMessage(
                 config.telegram.groupId,
                 scoreText,
                 { message_thread_id: existingEntry.tgThreadId, parse_mode: 'HTML',
@@ -1733,8 +1097,8 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               pollStore.updateScoreMsg(pollId, newScore.message_id);
             }
           } else {
-            // existingEntry lost (bot restarted) — just send score as standalone message
-            const sent = await tg.sendMessage(
+            // existingEntry lost (bot restarted) â€” just send score as standalone message
+            const sent = await tgBot.telegram.sendMessage(
               config.telegram.groupId,
               scoreText,
               { ...tgBase, parse_mode: 'HTML' },
@@ -1745,7 +1109,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return;
       }
 
-      // ── Fallback ───────────────────────────────────────────────────────────
+      // â”€â”€ Fallback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Before fallback: detect contact card by content shape (contactUid field)
       // Zalo sends contact cards as msgType 'chat.forward' with contactUid in content
       {
@@ -1764,8 +1128,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               const resp = await api.getUserInfo(uid) as {
                 changed_profiles?: Record<string, { displayName?: string }>;
               };
-              const uidKey = uid.includes('_') ? uid : `${uid}_0`;
-              contactName = resp?.changed_profiles?.[uidKey]?.displayName ?? uid;
+              contactName = resp?.changed_profiles?.[uid]?.displayName ?? uid;
               if (contactName !== uid) userCache.save(uid, contactName);
             } catch { /* non-fatal */ }
           }
@@ -1774,15 +1137,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               ? String((rawContent as Record<string, unknown>).qrCodeUrl)
               : media.qrCodeUrl;
 
-          const body = `👤 <b>Danh thiếp</b>\nTên: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
-          const fullText = type === ThreadType.Group ? `${groupCaption(bridgeSenderName)}\n${body}` : body;
+          const body = `ðŸ‘¤ <b>Danh thiáº¿p</b>\nTÃªn: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
+          const fullText = `${groupCaption(senderName)}\n${body}`;
 
           if (qrUrl) {
             // Send QR code image + caption
             try {
               const localPath = await downloadToTemp(qrUrl, `qr_${Date.now()}.jpg`);
               const stream = createReadStream(localPath);
-              const sent = await tg.sendPhoto(
+              const sent = await tgBot.telegram.sendPhoto(
                 config.telegram.groupId,
                 { source: stream },
                 { ...tgBase, caption: fullText, parse_mode: 'HTML' },
@@ -1790,235 +1153,39 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               saveTgMapping(sent);
               await cleanTemp(localPath);
             } catch {
-              const sent = await tg.sendMessage(config.telegram.groupId, fullText, { ...tgBase, parse_mode: 'HTML' });
+              const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, fullText, { ...tgBase, parse_mode: 'HTML' });
               saveTgMapping(sent);
             }
           } else {
-            const sent = await tg.sendMessage(config.telegram.groupId, fullText, { ...tgBase, parse_mode: 'HTML' });
+            const sent = await tgBot.telegram.sendMessage(config.telegram.groupId, fullText, { ...tgBase, parse_mode: 'HTML' });
             saveTgMapping(sent);
           }
           return;
         }
       }
 
-      // ── 13. E-card (birthday / event notification) ────────────────────────
-      if (msgType === ZALO_MSG_TYPES.ECARD) {
-        const ecardTitle = media.title ?? '';
-        const ecardDesc  = media.description ?? '';
-        let ecardNotify  = '';
-        try {
-          const p = JSON.parse(media.params ?? '{}') as { notifyTxt?: string };
-          ecardNotify = p.notifyTxt ?? '';
-        } catch { /* ignore */ }
-
-        const lines: string[] = [];
-        if (type === ThreadType.Group) lines.push(groupCaption(bridgeSenderName));
-        lines.push(`🎂 <b>${escapeHtml(ecardTitle)}</b>`);
-        if (ecardDesc && ecardDesc !== ecardTitle) lines.push(escapeHtml(ecardDesc));
-        if (ecardNotify) lines.push(`<i>${escapeHtml(ecardNotify)}</i>`);
-        const ecardCaption = lines.join('\n');
-
-        const imgUrl = media.href;
-        if (imgUrl) {
-          try {
-            const localPath = await downloadToTemp(imgUrl, `ecard_${Date.now()}.png`);
-            const sent = await tg.sendPhoto(
-              config.telegram.groupId,
-              { source: createReadStream(localPath) },
-              { ...tgBase, caption: ecardCaption, parse_mode: 'HTML' },
-            );
-            saveTgMapping(sent);
-            await cleanTemp(localPath);
-          } catch {
-            const sent = await tg.sendMessage(config.telegram.groupId, ecardCaption, { ...tgBase, parse_mode: 'HTML' });
-            saveTgMapping(sent);
-          }
-        } else {
-          const sent = await tg.sendMessage(config.telegram.groupId, ecardCaption, { ...tgBase, parse_mode: 'HTML' });
-          saveTgMapping(sent);
-        }
-        return;
-      }
-
-      // ── 14. Admin xoá tin nhắn (chat.delete) ──────────────────────────────
-      if (msgType === 'chat.delete') {
-        // content là mảng JSON: [{type,actionType,uidFrom,uidTo,clientDelMsgId,globalDelMsgId,destId}]
-        let deletedItems: Array<{
-          uidFrom?: string;
-          clientDelMsgId?: string | number;
-          globalDelMsgId?: string | number;
-          destId?: string | number;
-        }> = [];
-        try {
-          const raw = msg.data.content;
-          if (typeof raw === 'string') {
-            deletedItems = JSON.parse(raw) as typeof deletedItems;
-          } else if (Array.isArray(raw)) {
-            deletedItems = raw as typeof deletedItems;
-          }
-        } catch { /* ignore parse error */ }
-
-        if (deletedItems.length === 0) return;
-
-        // Resolve tên admin đã xoá (uidFrom của event, không phải của tin bị xoá)
-        const delActorUid = msg.data.uidFrom;
-        const delActorName = await resolveUserDisplayName(api, delActorUid, 'Admin');
-
-        for (const item of deletedItems) {
-          // Zalo gửi các ID của tin bị xoá trong 3 trường:
-          //   globalDelMsgId = server msgId (= globalMsgId / realMsgId)
-          //   clientDelMsgId = client cliMsgId
-          //   destId         = thường là msgId gốc (thêm vào để tăng khả năng tìm thấy)
-          const globalId =
-            item.globalDelMsgId !== undefined && String(item.globalDelMsgId) !== '0'
-              ? String(item.globalDelMsgId)
-              : undefined;
-          const clientId =
-            item.clientDelMsgId !== undefined && String(item.clientDelMsgId) !== '0'
-              ? String(item.clientDelMsgId)
-              : undefined;
-          const destId =
-            item.destId !== undefined && String(item.destId) !== '0'
-              ? String(item.destId)
-              : undefined;
-
-          // Lookup lần lượt: msgStore (Zalo→TG messages) rồi sentMsgStore (TG→Zalo messages)
-          const tgMsgId =
-            (globalId ? (msgStore.getTgMsgId(globalId) ?? sentMsgStore.getByZaloMsgId(globalId)) : undefined) ??
-            (clientId ? (msgStore.getTgMsgId(clientId) ?? sentMsgStore.getByZaloMsgId(clientId)) : undefined) ??
-            (destId   ? (msgStore.getTgMsgId(destId)   ?? sentMsgStore.getByZaloMsgId(destId))   : undefined);
-
-          if (tgMsgId === undefined) {
-            // Tin nhắn bị xoá chưa từng được bridge (gửi trước khi bridge start,
-            // hoặc từ thiết bị khác) — gửi thông báo chung vào topic, không reply.
-            console.log(
-              `[ZaloHandler] chat.delete: no TG mapping — globalDelMsgId=${globalId} clientDelMsgId=${clientId} destId=${destId}`,
-              JSON.stringify(item),
-            );
-            await tg.sendMessage(
-              config.telegram.groupId,
-              `<i>🗑 Admin <b>${escapeHtml(delActorName)}</b> đã xoá một tin nhắn (chưa được bridge) trên Zalo</i>`,
-              {
-                message_thread_id: topicId,
-                parse_mode: 'HTML',
-                disable_notification: silent,
-              },
-            );
-            continue;
-          }
-
-          await tg.sendMessage(
-            config.telegram.groupId,
-            `<i>🗑 Tin nhắn này đã bị <b>${escapeHtml(delActorName)}</b> (admin) xoá trên Zalo</i>`,
-            {
-              message_thread_id: topicId,
-              parse_mode: 'HTML',
-              reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
-              disable_notification: silent,
-            },
-          );
-          console.log(`[ZaloHandler] chat.delete: notified TG msg ${tgMsgId} deleted by ${delActorName} (${delActorUid})`);
-        }
-        return;
-      }
-
       console.log(`[ZaloHandler] Unhandled msgType="${msgType}" content:`, JSON.stringify(msg.data.content));
-      const fallback = type === ThreadType.Group
-        ? `${groupCaption(bridgeSenderName)}\n<i>[${msgType}]</i>`
-        : `<i>[${msgType}]</i>`;
-      const sentFallback = await tg.sendMessage(config.telegram.groupId, fallback, {
+      const fallback = `${groupCaption(senderName)}\n<i>[${msgType}]</i>`;
+      const sentFallback = await tgBot.telegram.sendMessage(config.telegram.groupId, fallback, {
         ...tgBase,
         parse_mode: 'HTML',
       });
       saveTgMapping(sentFallback);
     } catch (err) {
-      // If the TG topic was deleted, clear the stale mapping so the next message
-      // from this conversation will trigger topic recreation automatically.
-      if (isTopicDeletedError(err)) {
-        const staleTopicId = store.getTopicByZalo(msg.threadId, msg.type as 0 | 1);
-        if (staleTopicId !== undefined) {
-          console.warn(`[Zalo→TG] Topic ${staleTopicId} was deleted — removing stale mapping for ${msg.threadId}`);
-          store.remove(staleTopicId);
-        }
-      } else if (isDownloadError(err)) {
-        // Media download exhausted all retries (ETIMEDOUT, ECONNRESET, etc.).
-        // Notify the user so the message isn't silently dropped.
-        console.warn('[ZaloHandler] Media download failed after retries:', (err as Error)?.message ?? err);
-        const staleTopicId = store.getTopicByZalo(msg.threadId, msg.type as 0 | 1);
-        if (staleTopicId !== undefined) {
-          await tg.sendMessage(config.telegram.groupId,
-            '⚠️ <i>Không thể tải media từ Zalo (lỗi mạng tạm thời). Vui lòng yêu cầu người gửi chia sẻ lại.</i>',
-            { message_thread_id: staleTopicId, parse_mode: 'HTML' })
-            .catch(notifyErr => console.error('[ZaloHandler] Failed to send media-download-failure notice:', notifyErr));
-        }
-      } else {
-        console.error('[ZaloHandler] Error:', err);
-      }
-    }
-  };
-  _activeMessageHandler = handleZaloMessage;
-  api.listener.on('message', message => { void handleZaloMessage(message as unknown as ZaloMessage); });
-
-  // Catch-up stream from zca-js after reconnect.
-  // Replays recent messages through the same main handler to refill bridges.
-  api.listener.on('old_messages', (messages: ZaloMessage[], oldType: ThreadType) => {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    const req = _pendingHistoryRequest;
-    if (req && req.api === api && oldType === ThreadType.Group) {
-      req.pages += 1;
-      for (const msg of messages) {
-        if (String(msg.threadId) !== req.groupId) continue;
-        const id = String(msg.data?.msgId ?? `${msg.data?.ts}:${req.messages.length}`);
-        if (req.seen.has(id)) continue;
-        req.seen.add(id);
-        req.messages.push(msg);
-      }
-      if (req.messages.length >= req.count || req.pages >= 5) {
-        finishHistoryRequest(req);
-      } else {
-        const oldest = [...messages]
-          .sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0))[0];
-        const lastMsgId = oldest?.data?.msgId ? String(oldest.data.msgId) : null;
-        if (lastMsgId) api.listener.requestOldMessages(ThreadType.Group, lastMsgId);
-        else finishHistoryRequest(req);
-      }
-      return;
-    }
-    const sorted = [...messages].sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0));
-    console.log(`[Zalo→TG] Catch-up old_messages: replay ${sorted.length} item(s)`);
-    for (const oldMsg of sorted) {
-      void handleZaloMessage(oldMsg);
+      console.error('[ZaloHandler] Error:', err);
     }
   });
 
-  // ── Undo (thu hồi tin nhắn) ────────────────────────────────────────────────
+  // â”€â”€ Undo (thu há»“i tin nháº¯n) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('undo', async (undo: any) => {
     try {
       const data = undo?.data;
-      // The recalled Zalo message ID.
-      // Group chat: content.globalMsgId is set.
-      // Personal chat: globalMsgId=0, realMsgId="0", but content.cliMsgId is the cliMsgId
-      // of the recalled message (which we also store in _zaloToTg via zaloMsgIds).
-      const rawMsgId =
-        (data?.content?.globalMsgId && data.content.globalMsgId !== 0)
-          ? String(data.content.globalMsgId)
-          : (data?.content?.cliMsgId && String(data.content.cliMsgId) !== '0')
-            ? String(data.content.cliMsgId)
-            : '';
-      const zaloMsgId = rawMsgId;
-      if (!zaloMsgId) {
-        console.log(`[ZaloHandler] Undo: could not resolve msgId, raw undo data:`, JSON.stringify(data));
-        return;
-      }
+      // The recalled Zalo message ID
+      const zaloMsgId = String(data?.content?.globalMsgId ?? data?.msgId ?? '');
+      if (!zaloMsgId) return;
 
-      // Skip notification if we just initiated this recall from Telegram (prevents duplicate "🗑" message)
-      if (recentlyRecalledMsgIds.has(zaloMsgId)) {
-        console.log(`[ZaloHandler] Undo: skip notification for recently-recalled msgId=${zaloMsgId}`);
-        return;
-      }
-
-      const tgMsgId = msgStore.getTgMsgId(zaloMsgId);
+      const tgMsgId = msgStore.getTgMsgId(zaloMsgId) ?? sentMsgStore.getByZaloMsgId(zaloMsgId);
       if (tgMsgId === undefined) {
         console.log(`[ZaloHandler] Undo: no TG mapping for zaloMsgId=${zaloMsgId}`);
         return;
@@ -2030,257 +1197,117 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const topicId = store.getTopicByZalo(String(zaloId), type);
       if (topicId === undefined) return;
 
-      // Skip threads explicitly excluded via ZALO_EXCLUDE_THREADS (issue #61)
-      if (config.zalo.excludeThreads[`${type}:${String(zaloId)}`]) {
-        console.log(`[ZaloHandler] Undo: skip excluded thread ${zaloId}`);
-        return;
-      }
+      // Delete the forwarded TG message
+      await tgBot.telegram.deleteMessage(config.telegram.groupId, tgMsgId);
+      console.log(`[ZaloHandler] Undo: deleted TG msg ${tgMsgId} (zaloMsgId=${zaloMsgId})`);
 
-      // Dedupe: the reconnect catch-up sync replays undo events that were
-      // already delivered live — skip the ones we already notified (issue #65).
-      if (!recallNotifiedStore.markIfFirst(zaloMsgId)) {
-        console.log(`[ZaloHandler] Undo: already notified for msgId=${zaloMsgId}, skipping duplicate`);
-        return;
-      }
-
-      try {
-        // Reply to the original forwarded TG message to notify it was recalled on Zalo
-        await tg.sendMessage(
-          config.telegram.groupId,
-          `<i>🗑 Tin nhắn này đã bị thu hồi trên Zalo</i>`,
-          {
-            message_thread_id: topicId,
-            parse_mode: 'HTML',
-            reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
-          },
-        );
-        console.log(`[ZaloHandler] Undo: notified recall for TG msg ${tgMsgId} (zaloMsgId=${zaloMsgId})`);
-      } catch (sendErr) {
-        // Notification failed — unmark so a replayed event can retry it
-        recallNotifiedStore.unmark(zaloMsgId);
-        throw sendErr;
-      }
+      // Notify in topic
+      await tgBot.telegram.sendMessage(
+        config.telegram.groupId,
+        `<i>🗑 Tin nhắn đã được thu hồi</i>`,
+        { message_thread_id: topicId, parse_mode: 'HTML' },
+      );
     } catch (err) {
       console.error('[ZaloHandler] Undo error:', err);
     }
   });
 
-  // ── Reaction (cảm xúc) ─────────────────────────────────────────────────────
+  // â”€â”€ Reaction (cáº£m xÃºc) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const REACTION_EMOJI: Record<string, string> = {
-    '/-heart':   '❤️',
-    '/-strong':  '👍',
-    ':>':        '😄',
-    ':o':        '😮',
-    ':-((':      '😢',
-    ':-h':       '😡',
-    ':-*':       '😘',
-    ":')":       '😂',
-    '/-shit':    '💩',
-    '/-rose':    '🌹',
-    '/-break':   '💔',
-    '/-weak':    '👎',
-    ';xx':       '🥰',
-    ';-/':       '😕',
-    ';-)':       '😉',
-    '/-fade':    '✨',
-    '/-ok':      '👌',
-    '/-v':       '✌️',
-    '/-thanks':  '🙏',
-    '/-punch':   '👊',
-    '/-no':      '🙅',
-    '/-loveu':   '🤟',
-    '--b':       '😞',
-    ':((': '😭',
-    'x-)':       '😎',
-    '_()_':      '🙏',
-    '/-bd':      '🎂',
-    '/-bome':    '💣',
-    '/-beer':    '🍺',
-    '/-li':      '☀️',
-    '/-share':   '🔁',
-    '/-bad':     '😤',
-    '':          '❌',  // remove reaction
-  };
-
-  // Map a Zalo reaction icon → the closest emoji Telegram actually allows as a
-  // *reaction* (Telegram restricts reactions to a fixed set, narrower than
-  // arbitrary emoji). Icons without an entry here can't be shown as a native
-  // Telegram reaction and fall back to the summary-reply method.
-  const ZALO_TO_TG_REACTION: Record<string, TelegramEmoji> = {
-    '/-heart':  '❤',  // HEART
-    '/-strong': '👍',  // LIKE
-    ':>':       '😁',  // HAHA
-    ':o':       '🤯',  // WOW
-    ':-((':     '😢',  // CRY
-    ':((':      '😭',  // VERY_SAD
-    '--b':      '😢',  // SAD
-    ':-h':      '😡',  // ANGRY
-    ':-*':      '😘',  // KISS
-    ';xx':      '🥰',  // LOVE
-    ":')":      '🤣',  // TEARS_OF_JOY
-    '/-shit':   '💩',  // SHIT
-    '/-break':  '💔',  // BROKEN_HEART
-    '/-weak':   '👎',  // DISLIKE
-    ';-/':      '🤔',  // CONFUSED
-    '/-ok':     '👌',  // OK
-    '_()_':     '🙏',  // PRAY
-    '/-thanks': '🙏',  // THANKS
-    '/-bd':     '🎉',  // BIRTHDAY
-    'x-)':      '😎',  // (cool)
+    '/-heart':   '\u2764\ufe0f',
+    '/-strong':  '\ud83d\udc4d',
+    ':>':        '\ud83d\ude04',
+    ':o':        '\ud83d\ude2e',
+    ':-(( ':     '\ud83d\ude22',
+    ':-((':      '\ud83d\ude22',
+    ':-h':       '\ud83d\ude21',
+    ':-*':       '\ud83d\ude18',
+    ":')":       '\ud83d\ude02',
+    '/-shit':    '\ud83d\udca9',
+    '/-rose':    '\ud83c\udf39',
+    '/-break':   '\ud83d\udc94',
+    '/-weak':    '\ud83d\udc4e',
+    ';xx':       '\ud83e\udd70',
+    ';-/':       '\ud83d\ude15',
+    ';-)':       '\ud83d\ude09',
+    '/-fade':    '\u2728',
+    '/-ok':      '\ud83d\udc4c',
+    '/-v':       '\u270c\ufe0f',
+    '/-thanks':  '\ud83d\ude4f',
+    '/-punch':   '\ud83d\udc4a',
+    '/-no':      '\ud83d\ude45',
+    '/-loveu':   '\ud83e\udd1f',
+    '--b':       '\ud83d\ude1e',
+    ':((':       '\ud83d\ude2d',
+    'x-)':       '\ud83d\ude0e',
+    '_()_':      '\ud83d\ude4f',
+    '/-bd':      '\ud83c\udf82',
+    '/-bome':    '\ud83d\udca3',
+    '/-beer':    '\ud83c\udf7a',
+    '/-li':      '\u2600\ufe0f',
+    '/-share':   '\ud83d\udd01',
+    '/-bad':     '\ud83d\ude24',
+    '':          '\u274c',
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('reaction', async (reaction: any) => {
+    return;
     try {
       const data = reaction?.data;
       const rIcon: string = data?.content?.rIcon ?? '';
-      const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
+      const emoji = REACTION_EMOJI[rIcon] ?? '💬';
 
-      // If empty reaction icon → user removed reaction; skip notification
+      // If empty reaction icon â†’ user removed reaction; skip notification
       if (!rIcon) return;
 
-      const targetMsgIds = extractReactionTargetMsgIds(data);
-      if (targetMsgIds.length === 0) return;
-
-      const zaloId = String(reaction?.threadId ?? data?.idTo ?? "");
-      if (!zaloId) return;
-
-      const actorUid = typeof data?.uidFrom === 'string' ? data.uidFrom.trim() : '';
-      const rawName = typeof data?.dName === 'string' ? data.dName.trim() : '';
-      // Server-generated id unique per reaction action: repeated identical taps
-      // (same person dropping ❤️ several times) are counted, while re-emits of
-      // the same action are still deduped (issue #65).
-      const actionId = typeof data?.actionId === 'string' ? data.actionId.trim() : undefined;
-
-      if (reactionEventDedupeStore.isDuplicateZaloInbound({
-        zaloId,
-        targetMsgIds,
-        icon: rIcon,
-        actorUid: actorUid || undefined,
-        actorName: rawName || undefined,
-        actionId,
-      })) {
-        console.log(`[ZaloHandler] Reaction: skip duplicate event ${zaloId}/${targetMsgIds.join('|')}/${rIcon} action=${actionId ?? '-'}`);
+      const gMsgIds: Array<{ gMsgID?: string | number }> = data?.content?.rMsg ?? [];
+      const zaloMsgId = String(gMsgIds[0]?.gMsgID ?? '');
+      if (!zaloMsgId) {
+        console.warn('[ZaloHandler] Reaction skipped: missing zaloMsgId', JSON.stringify(data?.content ?? {}));
         return;
       }
 
-      if (reaction?.isSelf && targetMsgIds.some(msgId => reactionEchoStore.consume(zaloId, msgId, rIcon))) {
-        console.log(`[ZaloHandler] Reaction: skip bridge echo for ${zaloId}/${targetMsgIds.join('|')}/${rIcon}`);
-        return;
-      }
-
-      let tgMsgId: number | undefined;
-      for (const msgId of targetMsgIds) {
-        tgMsgId = msgStore.getTgMsgId(msgId) ?? sentMsgStore.getByZaloMsgId(msgId);
-        if (tgMsgId !== undefined) break;
-      }
-      if (tgMsgId === undefined) {
-        console.log(`[ZaloHandler] Reaction: no TG mapping for target=${targetMsgIds.join('|')}`);
-        return;
-      }
-
+      const zaloId = reaction?.threadId ?? data?.idTo;
       const type   = (reaction?.isGroup ? 1 : 0) as 0 | 1;
-      const topicId = store.getTopicByZalo(zaloId, type);
-      if (topicId === undefined) return;
-
-      // Skip threads explicitly excluded via ZALO_EXCLUDE_THREADS (issue #61)
-      if (config.zalo.excludeThreads[`${type}:${zaloId}`]) {
-        console.log(`[ZaloHandler] Reaction: skip excluded thread ${zaloId}`);
+      const topicId = store.getTopicByZalo(String(zaloId), type);
+      if (topicId === undefined) {
+        console.warn(`[ZaloHandler] Reaction skipped: no topic for zaloId=${zaloId} type=${type}`);
         return;
       }
 
-      // In 1-1 DMs, attach the reaction directly onto the Telegram message
-      // (clean, no reply) — there's only one possible reactor, so no name is
-      // needed. A bot reaction shows as the bot and Telegram can only hold one
-      // reaction per message, which is fine for a single peer but would collapse
-      // distinct reactions in a group; so groups always fall through to the
-      // named summary reply below, which can tell multiple reactors apart.
-      // The bot's own reactions don't generate message_reaction updates, so this
-      // can't echo back to Zalo. Unmappable/rejected icons also fall through.
-      // ZALO_DM_NATIVE_REACTION=0 opts out of native DM reactions and always
-      // uses the named summary reply (issue #65).
-      const tgReaction = ZALO_TO_TG_REACTION[rIcon];
-      if (type === 0 && tgReaction && config.zalo.dmNativeReaction) {
-        try {
-          await tg.setMessageReaction(
-            config.telegram.groupId,
-            tgMsgId,
-            [{ type: 'emoji', emoji: tgReaction }],
-          );
-          return; // shown natively on the message — no reply message
-        } catch (err) {
-          const m = err instanceof Error ? err.message : String(err);
-          console.warn(`[ZaloHandler] Native reaction "${tgReaction}" rejected, using summary reply: ${m}`);
-          // fall through to the named summary reply
-        }
+      const tgMsgId = msgStore.getTgMsgId(zaloMsgId) ?? sentMsgStore.getByZaloMsgId(zaloMsgId);
+      const dName = data?.dName ?? data?.uidFrom ?? 'ai đó';
+      const text = tgMsgId === undefined
+        ? `${emoji} <b>${escapeHtml(dName)}</b> reacted to a message`
+        : `${emoji} <b>${escapeHtml(dName)}</b>`;
+
+      if (tgMsgId === undefined) {
+        console.warn(`[ZaloHandler] Reaction fallback: no TG mapping for zaloMsgId=${zaloMsgId}`);
+        await tgBot.telegram.sendMessage(
+          config.telegram.groupId,
+          text,
+          { message_thread_id: topicId, parse_mode: 'HTML' },
+        );
+        return;
       }
 
-      const actorName = await resolveUserDisplayName(
-        api,
-        actorUid || undefined,
-        rawName || 'ai đó',
-        type === 1 ? zaloId : undefined,
+      // Send reaction emoji as a reply to the forwarded TG message
+      await tgBot.telegram.sendMessage(
+        config.telegram.groupId,
+        text,
+        {
+          message_thread_id: topicId,
+          parse_mode: 'HTML',
+          reply_parameters: { message_id: tgMsgId!, allow_sending_without_reply: true },
+        },
       );
-
-      // Aggregate reactions: update the summary entry then debounce send/edit
-      const entry = reactionSummaryStore.upsert(tgMsgId, emoji, actorName);
-
-      if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-      entry.debounceTimer = setTimeout(async () => {
-        entry.debounceTimer = null;
-        const text = reactionSummaryStore.buildText(entry);
-        if (!text) return;
-        // Skip if text hasn't changed (same person reacting fires multiple events)
-        if (text === entry.lastSentText) return;
-        try {
-          if (entry.summaryTgMsgId === null) {
-            // First reaction: send a new reply message
-            const sent = await tg.sendMessage(
-              config.telegram.groupId,
-              text,
-              {
-                message_thread_id: topicId,
-                parse_mode: 'HTML',
-                reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
-              },
-            );
-            reactionSummaryStore.setSummaryMsgId(tgMsgId, sent.message_id);
-            entry.lastSentText = text;
-          } else {
-            // Subsequent reactions: edit the existing summary message
-            await tg.editMessageText(
-              config.telegram.groupId,
-              entry.summaryTgMsgId,
-              undefined,
-              text,
-              { parse_mode: 'HTML' },
-            );
-            entry.lastSentText = text;
-          }
-        } catch (editErr) {
-          const msg = editErr instanceof Error ? editErr.message : String(editErr);
-          if (!msg.includes('message is not modified')) {
-            console.warn('[ZaloHandler] Reaction summary update failed:', editErr);
-          }
-        }
-      }, 600);
     } catch (err) {
       console.error('[ZaloHandler] Reaction error:', err);
     }
   });
 
-  // Catch-up stream from zca-js after reconnect.
-  // Replays reaction history through the same reaction pipeline + dedupe.
-  api.listener.on('old_reactions', (reactions: any[], isGroup: boolean) => {
-    if (!Array.isArray(reactions) || reactions.length === 0) return;
-    console.log(`[Zalo→TG] Catch-up old_reactions: replay ${reactions.length} item(s), isGroup=${isGroup}`);
-    for (const reaction of reactions) {
-      if (reaction && reaction.isGroup === undefined) reaction.isGroup = isGroup;
-      api.listener.emit('reaction', reaction);
-    }
-  });
-
-  // ── Group events (vào/rời nhóm) ────────────────────────────────────────────
+  // â”€â”€ Group events (vÃ o/rá»i nhÃ³m) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('group_event', async (event: any) => {
     try {
@@ -2289,70 +1316,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const groupId = String(event?.threadId ?? data?.groupId ?? '');
       if (!groupId) return;
 
-      // ── Join request: someone wants to join the group ─────────────────────
-      if (type === 'join_request') {
-        const uids: string[] = data?.uids ?? [];
-        if (!uids.length) return;
-
-        // Check admin status — must call web API (adminIds not in AppGroupData)
-        let adminIds: string[] = [];
-        let creatorId = '';
-        try {
-          const fullInfo = await api.getGroupInfo(groupId) as {
-            gridInfoMap?: Record<string, { adminIds?: string[]; creatorId?: string }>;
-          };
-          const gInfo = fullInfo?.gridInfoMap?.[groupId];
-          adminIds = gInfo?.adminIds ?? [];
-          creatorId = gInfo?.creatorId ?? '';
-        } catch { /* ignore */ }
-
-        const ownUid = String(api.getOwnId?.() ?? '');
-        const isAdmin = ownUid && (adminIds.includes(ownUid) || creatorId === ownUid);
-        if (!isAdmin) {
-          console.log(`[ZaloHandler] join_request group=${groupId}: bot is not admin, skip`);
-          return;
-        }
-
-        const topicId = store.getTopicByZalo(groupId, 1 /* Group */);
-        if (topicId === undefined) return;
-
-        const totalPending: number = data?.totalPending ?? uids.length;
-
-        for (const uid of uids) {
-          let displayName = uid;
-          try {
-            const resp = await api.getUserInfo(uid) as {
-              changed_profiles?:   Record<string, { displayName?: string; zaloName?: string }>;
-              unchanged_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-            };
-            const uidKey = uid.includes('_') ? uid : `${uid}_0`;
-            const profile =
-              resp?.changed_profiles?.[uidKey]   ?? resp?.changed_profiles?.[uid]   ??
-              resp?.unchanged_profiles?.[uidKey] ?? resp?.unchanged_profiles?.[uid];
-            displayName = profile?.displayName?.trim() || profile?.zaloName?.trim() || uid;
-          } catch { /* ignore */ }
-
-          const text = `🔔 <b>${escapeHtml(displayName)}</b> (<code>${uid}</code>) muốn tham gia nhóm.\n\nTổng đang chờ duyệt: ${totalPending}`;
-          await tg.sendMessage(
-            config.telegram.groupId,
-            text,
-            {
-              message_thread_id: topicId,
-              parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: '✅ Duyệt', callback_data: `gm:approve:${groupId}:${uid}` },
-                  { text: '❌ Từ chối', callback_data: `gm:reject:${groupId}:${uid}` },
-                ]],
-              },
-            },
-          );
-        }
-        console.log(`[ZaloHandler] join_request group=${groupId} uids=${uids.join(',')} (admin=${ownUid})`);
-        return;
-      }
-
-      // ── Poll vote: UPDATE_BOARD with BoardType.Poll ────────────────────────
+      // â”€â”€ Poll vote: UPDATE_BOARD with BoardType.Poll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (type === 'update_board' || type === 'remove_board') {
         // groupTopic.params is a JSON string containing poll info
         const rawParams = data?.groupTopic?.params ?? data?.topic?.params ?? '';
@@ -2369,11 +1333,11 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
             try { detail = await api.getPollDetail(pollId); } catch { /* ignore */ }
             if (detail?.options) {
               const actorName = data?.updateMembers?.[0]?.dName ?? data?.creatorId ?? '';
-              const header = actorName ? `${actorName} vừa bình chọn` : 'Cập nhật bình chọn';
+              const header = actorName ? `${actorName} vá»«a bÃ¬nh chá»n` : 'Cáº­p nháº­t bÃ¬nh chá»n';
               const scoreText = buildScoreText(header, detail.options, detail.closed ?? false);
               console.log(`[ZaloHandler] Poll ${pollId} update:`, detail.options.map((o: { content: string; votes: number }) => `${o.content}=${o.votes}`).join(', '));
               try {
-                await tg.editMessageText(
+                await tgBot.telegram.editMessageText(
                   config.telegram.groupId,
                   entry.tgScoreMsgId,
                   undefined,
@@ -2382,18 +1346,18 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
                     parse_mode: 'HTML',
                     reply_markup: detail.closed
                       ? { inline_keyboard: [] }
-                      : { inline_keyboard: [[{ text: '🔒 Khoá bình chọn', callback_data: `lock_poll:${pollId}` }]] },
+                      : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] },
                   },
                 );
               } catch {
-                const newScore = await tg.sendMessage(
+                const newScore = await tgBot.telegram.sendMessage(
                   config.telegram.groupId,
                   scoreText,
                   { message_thread_id: entry.tgThreadId, parse_mode: 'HTML',
                     reply_parameters: { message_id: entry.tgPollMsgId, allow_sending_without_reply: true },
                     reply_markup: detail.closed
                       ? { inline_keyboard: [] }
-                      : { inline_keyboard: [[{ text: '🔒 Khoá bình chọn', callback_data: `lock_poll:${pollId}` }]] } },
+                      : { inline_keyboard: [[{ text: 'ðŸ”’ KhoÃ¡ bÃ¬nh chá»n', callback_data: `lock_poll:${pollId}` }]] } },
                 );
                 pollStore.updateScoreMsg(pollId, newScore.message_id);
               }
@@ -2405,31 +1369,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return;
       }
 
-      // ── Group name change: update TG topic name ────────────────────────────────────────
-      // Zalo sends act="update" (type="update") when group is renamed, with groupName in data.
-      // act="update_setting" is kept as fallback.
-      if (type === 'update' || type === 'update_setting') {
-        const newName: string = (
-          (data?.groupName as string | undefined) ??
-          (data?.name     as string | undefined) ??
-          ''
-        ).trim();
-        if (newName) {
-          const tId = store.getTopicByZalo(groupId, 1);
-          if (tId !== undefined) {
-            await tg.editForumTopic(
-              config.telegram.groupId, tId, { name: topicName(newName, 1) },
-            ).catch(() => undefined);
-            const existing = store.getEntryByTopic(tId);
-            if (existing) store.set({ ...existing, name: newName });
-            _groupInfoCache.delete(groupId);
-            console.log(`[ZaloHandler] GroupEvent ${type}: group ${groupId} renamed to "${newName}"`);
-          }
-        }
-        return;
-      }
-
-      // Only notify for join/leave/remove — skip other setting changes, pins, etc.
+      // Only notify for join/leave/remove â€” skip setting changes, pins, etc.
       const NOTIFY_TYPES = new Set(['join', 'leave', 'remove_member', 'block_member']);
       if (!type || !NOTIFY_TYPES.has(type)) return;
 
@@ -2443,18 +1383,18 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
       let notifText = '';
       if (type === 'join') {
-        notifText = `➕ <b>${escapeHtml(names)}</b> đã tham gia nhóm`;
+        notifText = `\u2795 <b>${escapeHtml(names)}</b> \u0111\u00e3 tham gia nh\u00f3m`;
       } else if (type === 'leave') {
-        notifText = `➖ <b>${escapeHtml(names)}</b> đã rời nhóm`;
+        notifText = `\u2796 <b>${escapeHtml(names)}</b> \u0111\u00e3 r\u1eddi nh\u00f3m`;
       } else if (type === 'remove_member') {
-        notifText = `🚫 <b>${escapeHtml(names)}</b> đã bị xóa khỏi nhóm`;
+        notifText = `\ud83d\udeab <b>${escapeHtml(names)}</b> \u0111\u00e3 b\u1ecb x\u00f3a kh\u1ecfi nh\u00f3m`;
       } else if (type === 'block_member') {
-        notifText = `🔒 <b>${escapeHtml(names)}</b> đã bị chặn khỏi nhóm`;
+        notifText = `\ud83d\udd12 <b>${escapeHtml(names)}</b> \u0111\u00e3 b\u1ecb ch\u1eb7n kh\u1ecfi nh\u00f3m`;
       }
 
       if (!notifText) return;
 
-      await tg.sendMessage(
+      await tgBot.telegram.sendMessage(
         config.telegram.groupId,
         `<i>${notifText}</i>`,
         { message_thread_id: topicId, parse_mode: 'HTML' },
@@ -2462,133 +1402,6 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       console.log(`[ZaloHandler] GroupEvent type=${type} group=${groupId}`);
     } catch (err) {
       console.error('[ZaloHandler] GroupEvent error:', err);
-    }
-  });
-
-  // ── Friend events (lời mời kết bạn, chấp nhận, ...) ──────────────────────
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  api.listener.on('friend_event', async (evt: any) => {
-    try {
-      // Only care about incoming friend request (someone requesting to be our friend)
-      if (evt.type !== FriendEventType.REQUEST) return;
-      // isSelf = we sent the request, skip
-      if (evt.isSelf) return;
-
-      const data = evt.data as { fromUid: string; toUid: string; message: string };
-      const fromUid = data?.fromUid;
-      if (!fromUid) return;
-
-      // Resolve display name via getUserInfo (API returns key as "uid_0")
-      let displayName = fromUid;
-      try {
-        const resp = await api.getUserInfo(fromUid) as {
-          changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-          unchanged_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
-        };
-        const uidKey = fromUid.includes('_') ? fromUid : `${fromUid}_0`;
-        const profile =
-          resp?.changed_profiles?.[uidKey] ??
-          resp?.changed_profiles?.[fromUid] ??
-          resp?.unchanged_profiles?.[uidKey] ??
-          resp?.unchanged_profiles?.[fromUid];
-        displayName = profile?.displayName?.trim() || profile?.zaloName?.trim() || fromUid;
-      } catch { /* use uid as fallback */ }
-
-      const msgText = data?.message?.trim();
-
-      await tg.sendMessage(
-        config.telegram.groupId,
-        `👤 <b>${escapeHtml(displayName)}</b> muốn kết bạn với bạn qua Zalo!${msgText ? `\n💬 <i>${escapeHtml(msgText)}</i>` : ''}`,
-        {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '✅ Chấp nhận', callback_data: `fr:accept:${fromUid}` },
-              { text: '❌ Từ chối',   callback_data: `fr:reject:${fromUid}` },
-            ]],
-          },
-        },
-      );
-      console.log(`[ZaloHandler] FriendEvent REQUEST from ${fromUid} (${displayName})`);
-    } catch (err) {
-      console.error('[ZaloHandler] FriendEvent error:', err);
-    }
-  });
-
-  // ── Typing indicator (đang soạn tin) ───────────────────────────────────────
-  // Zalo fires `typing` repeatedly (every ~1s) while someone is composing.
-  // We mirror it into the matching Telegram topic via sendChatAction, whose
-  // "typing" status auto-clears after ~5s — so we only need to refresh it
-  // occasionally. Throttle per-thread to avoid hammering the Telegram API.
-  //
-  // Direction is Zalo→Telegram only: this handler never sends anything back to
-  // Zalo, so it adds zero outbound traffic and no account-ban risk.
-  const TYPING_THROTTLE_MS = 4000;
-  const lastTypingForwardedAt = new Map<string, number>();
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  api.listener.on('typing', async (typing: any) => {
-    try {
-      const zaloId = String(typing?.threadId ?? typing?.data?.gid ?? typing?.data?.uid ?? '');
-      if (!zaloId) return;
-
-      const type = (typing?.type === ThreadType.Group || typing?.data?.gid) ? 1 : 0;
-      const topicId = store.getTopicByZalo(zaloId, type as 0 | 1);
-      if (topicId === undefined) return; // only surface typing for known conversations
-
-      const now = Date.now();
-      if (now - (lastTypingForwardedAt.get(zaloId) ?? 0) < TYPING_THROTTLE_MS) return;
-      lastTypingForwardedAt.set(zaloId, now);
-
-      await tg.sendChatAction(config.telegram.groupId, 'typing', { message_thread_id: topicId });
-    } catch (err) {
-      console.warn('[ZaloHandler] Typing error:', err);
-    }
-  });
-
-  // ── Seen indicator (đã xem) ────────────────────────────────────────────────
-  // When the other side reads a message we sent from Telegram, Zalo emits
-  // `seen_messages`. We mark the corresponding Telegram message with a 👀
-  // reaction so the user can tell their message was read — mirroring Zalo's
-  // "Đã xem". Each Telegram message is marked at most once.
-  //
-  // Direction is Zalo→Telegram only (read-only on the Zalo side).
-  const SEEN_DEDUPE_MAX = 2000;
-  const seenMarkedTgMsgIds = new Set<number>();
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  api.listener.on('seen_messages', async (messages: any[]) => {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    for (const m of messages) {
-      try {
-        const data = m?.data ?? {};
-        // Resolve the Zalo message id the peer just read, then map it back to
-        // the Telegram message that originated it.
-        const candidates = [data.msgId, data.realMsgId]
-          .map((id: unknown) => (id === undefined || id === null ? '' : String(id).trim()))
-          .filter((id: string) => id && id !== '0');
-
-        let tgMsgId: number | undefined;
-        for (const id of candidates) {
-          tgMsgId = sentMsgStore.getByZaloMsgId(id) ?? msgStore.getTgMsgId(id);
-          if (tgMsgId !== undefined) break;
-        }
-        if (tgMsgId === undefined || seenMarkedTgMsgIds.has(tgMsgId)) continue;
-
-        // Bound the dedupe set so it can't grow without limit.
-        if (seenMarkedTgMsgIds.size >= SEEN_DEDUPE_MAX) {
-          seenMarkedTgMsgIds.clear();
-        }
-        seenMarkedTgMsgIds.add(tgMsgId);
-
-        await tg.setMessageReaction(
-          config.telegram.groupId,
-          tgMsgId,
-          [{ type: 'emoji', emoji: '👀' }],
-        );
-      } catch (err) {
-        console.warn('[ZaloHandler] Seen error:', err);
-      }
     }
   });
 }

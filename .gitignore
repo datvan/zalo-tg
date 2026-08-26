@@ -3,7 +3,6 @@ node_modules/
 
 # Build output
 dist/
-bin/
 
 # Environment & secrets — KHÔNG commit các file này
 .env
@@ -13,8 +12,7 @@ credentials.json
 # Dữ liệu runtime
 data/topics.json
 data/*.json
-data/*.json.gz
-data/bot-api/
+data/*cookies*.txt
 tmp/
 
 # Logs
@@ -27,5 +25,3 @@ npm-debug.log*
 # Editor
 .vscode/
 .idea/
-logs/
-app-session.json
