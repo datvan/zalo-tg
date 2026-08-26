@@ -169,7 +169,7 @@ export function applyZaloMarkupHtml(
 }
 
 /**
- * Format a group message as:
+ * Format a sender message as:
  *   <b>SenderName:</b>
  *   content…
  */
@@ -185,7 +185,7 @@ export function formatGroupMsgHtml(senderName: string, bodyHtml: string): string
   return `<b>${escapeHtml(truncate(senderName, 64))}:</b>\n${bodyHtml}`;
 }
 
-/** Caption for group media (just bold sender name). */
+/** Caption for media (bold sender name). */
 export function groupCaption(senderName: string): string {
   return `<b>${escapeHtml(truncate(senderName, 64))}</b>`;
 }

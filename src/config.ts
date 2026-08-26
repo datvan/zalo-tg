@@ -71,24 +71,14 @@ export const config = {
   telegram: {
     token:       requireEnv('TG_TOKEN'),
     groupId:     requireTelegramGroupId(),
-    /** URL của local Bot API server, ví dụ: http://localhost:8081.
-     *  Chỉ dùng khi LOCAL_BOT_API=1 và TG_LOCAL_SERVER được set.
-     *  Nếu không → dùng official api.telegram.org. */
+    adminUserIds: (process.env.ADMIN_USER_IDS ?? '').split(',').map(s => Number(s.trim())).filter(Number.isSafeInteger),
     localServer: localBotApiServer(),
   },
   zalo: {
     credentialsPath: resolvePath(process.env.ZALO_CREDENTIALS_PATH, 'credentials.json'),
     skipMutedGroups: envFlag('ZALO_SKIP_MUTED_GROUPS'),
-    // Mirror Zalo's "mute notifications" → deliver those threads silently on
-    // Telegram (messages still arrive, just no ping). On by default; set
-    // ZALO_MUTE_SILENT=0 to always notify.
     muteSilentMirror: envFlag('ZALO_MUTE_SILENT', true),
-    // In 1-1 DMs, show Zalo reactions as a native Telegram reaction on the
-    // message (default). Set ZALO_DM_NATIVE_REACTION=0 to fall back to the
-    // aggregated "❤️ Name" summary reply used in groups (issue #65).
     dmNativeReaction: envFlag('ZALO_DM_NATIVE_REACTION', true),
-    // Threads to never mirror, as "type:id" pairs (type 0=DM, 1=group).
-    // Bare ids are treated as groups. Messages from these threads are ignored.
     excludeThreads: excludeThreads(),
   },
   dataDir: resolvePath(process.env.DATA_DIR, 'data'),
