@@ -459,8 +459,10 @@ export function setupTelegramHandler(
     const zaloThreadType = sent.threadType === 1 ? ThreadType.Group : ThreadType.User;
 
     try {
+      const msgId = sent.msgId ?? sent.msgIds?.[0];
+      if (msgId === undefined) throw new Error('Sent message has no Zalo message ID');
       await currentApi.undo(
-        { msgId: sent.msgId, cliMsgId: 0 },
+        { msgId, cliMsgId: 0 },
         sent.zaloId,
         zaloThreadType,
       );
@@ -789,25 +791,19 @@ export function setupTelegramHandler(
         );
 
         try {
-          let sendResult = await api.sendMessage(
+          const sendResult = await api.sendMessage(
             {
               msg: msg.text,
-              ...(zaloQuote ? { quote: zaloQuote } : {}),
+              ...(zaloQuote ? { quote: zaloQuote as never } : {}),
               ...(zaloMentions.length ? { mentions: zaloMentions } : {}),
             },
             zaloId,
             threadType,
           ).catch(async (err: unknown) => {
-            // Code 114 often means the quote data is incompatible (e.g. quoting
-            // a media message whose content structure differs from what zca-js
-            // expects). Retry without the quote so the text still goes through.
             if ((err as { code?: number }).code === 114 && zaloQuote) {
               console.warn('[TG→Zalo] code 114 with quote, retrying without quote');
               return api.sendMessage(
-                {
-                  msg: msg.text,
-                  ...(zaloMentions.length ? { mentions: zaloMentions } : {}),
-                },
+                { msg: msg.text, ...(zaloMentions.length ? { mentions: zaloMentions } : {}) },
                 zaloId,
                 threadType,
               );
@@ -963,26 +959,17 @@ export function setupTelegramHandler(
           // carry the quote would create visible noise in the conversation.
           const effectiveCaption = caption ?? '';
 
-          const sendResult = await withTimeout(api.sendMessage(
-            {
-              msg: effectiveCaption,
-              attachments: [localPath],
-              ...(effectiveCaption.length && zaloQuote ? { quote: zaloQuote } : {}),
-              ...(captionMentions?.length ? { mentions: captionMentions } : {}),
-            },
-            zaloId,
-            threadType,
-          )).catch(async (err: unknown) => {
-            // Code 114 with quote: quote data incompatible with this message type.
-            // Retry without quote so the attachment still goes through.
+          const attachmentMessage = {
+            msg: effectiveCaption,
+            attachments: [localPath],
+            ...(effectiveCaption.length && zaloQuote ? { quote: zaloQuote } : {}),
+            ...(captionMentions?.length ? { mentions: captionMentions } : {}),
+          };
+          const sendResult = await withTimeout(api.sendMessage(attachmentMessage as never, zaloId, threadType)).catch(async (err: unknown) => {
             if ((err as { code?: number }).code === 114) {
               console.warn('[TG→Zalo] code 114 on attachment+quote, retrying without quote');
               return withTimeout(api.sendMessage(
-                {
-                  msg: effectiveCaption,
-                  attachments: [localPath],
-                  ...(captionMentions?.length ? { mentions: captionMentions } : {}),
-                },
+                { msg: effectiveCaption, attachments: [localPath], ...(captionMentions?.length ? { mentions: captionMentions } : {}) } as never,
                 zaloId,
                 threadType,
               ));
@@ -1034,13 +1021,14 @@ export function setupTelegramHandler(
             localPaths.push(await downloadToTempWithRetry(fileLink.toString(), item.fname));
           }
           if (localPaths.length === 0) return;
+          const mediaGroupMessage = {
+            msg: caption,
+            attachments: localPaths,
+            ...(zaloQuote ? { quote: zaloQuote } : {}),
+            ...(capMentions?.length ? { mentions: capMentions } : {}),
+          };
           const sendResult = await api.sendMessage(
-            {
-              msg: caption,
-              attachments: localPaths,
-              ...(zaloQuote ? { quote: zaloQuote } : {}),
-              ...(capMentions?.length ? { mentions: capMentions } : {}),
-            },
+            mediaGroupMessage as never,
             meta.zaloId,
             meta.threadType === 1 ? ThreadType.Group : ThreadType.User,
           );
