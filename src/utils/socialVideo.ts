@@ -1,4 +1,4 @@
-﻿import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { cleanTemp } from './media.js';
@@ -38,19 +38,8 @@ export async function prepareTelegramVideoPaths(paths: string[]): Promise<string
         continue;
       }
       const duration = await probeDurationSeconds(inputPath);
-      const partCount = telegramPartCountForSize(size);
-      const segmentDuration = Math.ceil(duration / partCount);
-      for (let i = 0; i < partCount; i++) {
-        const start = i * segmentDuration;
-        if (start >= duration) break;
-        const part = await normalizeSegmentForZalo(inputPath, start, Math.min(segmentDuration, duration - start), i + 1);
-        const partSize = statSync(part).size;
-        if (partSize > TELEGRAM_MAX_BYTES) {
-          await cleanTemp(part);
-          throw new Error(`Telegram video segment ${i + 1} too large after split: ${partSize}`);
-        }
-        prepared.push(part);
-      }
+      const parts = await splitVideoBySize(inputPath, duration, telegramPartCountForSize(size), TELEGRAM_MAX_BYTES, 'Telegram');
+      prepared.push(...parts);
     }
     return prepared;
   } catch (err) {
@@ -243,7 +232,7 @@ export function extractUnsupportedSocialPostUrl(text: string): { url: string; re
   }
   const url = match[0].replace(/[\])}>.,!?]+$/, '');
   if (/tiktok\.com\/[^\s]+\/photo\/\d+/i.test(url)) {
-    return { url, reason: 'Link nÃƒÂ y lÃƒÂ  TikTok photo post, khÃƒÂ´ng phÃ¡ÂºÂ£i video nÃƒÂªn bridge chÃ†Â°a hÃ¡Â»â€” trÃ¡Â»Â£ tÃ¡ÂºÂ£i/upload tÃ¡Â»Â± Ã„â€˜Ã¡Â»â„¢ng.' };
+    return { url, reason: 'Link này là TikTok photo post, không phải video nên bridge chưa hỗ trợ tải/upload tự động.' };
   }
   return undefined;
 }
@@ -493,28 +482,49 @@ async function normalizeSegmentForZalo(inputPath: string, start: number, duratio
   return outputPath;
 }
 
+async function splitVideoBySize(
+  inputPath: string,
+  duration: number,
+  initialParts: number,
+  maxBytes: number,
+  label: string,
+): Promise<string[]> {
+  let parts = Math.max(2, initialParts);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const outputs: string[] = [];
+    let largestSize = 0;
+    const segmentDuration = Math.ceil(duration / parts);
+    try {
+      for (let i = 0; i < parts; i++) {
+        const start = i * segmentDuration;
+        if (start >= duration) break;
+        const out = await normalizeSegmentForZalo(inputPath, start, Math.min(segmentDuration, duration - start), attempt * parts + i + 1);
+        const size = statSync(out).size;
+        largestSize = Math.max(largestSize, size);
+        outputs.push(out);
+        if (size > maxBytes) break;
+      }
+      if (largestSize <= maxBytes && outputs.length > 0) return outputs;
+    } catch (err) {
+      for (const output of outputs) await cleanTemp(output);
+      throw err;
+    }
+    for (const output of outputs) await cleanTemp(output);
+    parts = Math.max(parts + 1, Math.ceil(parts * Math.max(1.5, largestSize / maxBytes) * 1.1));
+    console.warn(`[SocialVideo] ${label} split attempt ${attempt + 1} exceeded ${maxBytes} bytes; retrying with ${parts} part(s)`);
+  }
+  throw new Error(`${label} video could not be split into parts below ${maxBytes} bytes`);
+}
+
 async function splitForZalo(inputPath: string, firstNormalizedPath: string): Promise<string[]> {
   const firstSize = statSync(firstNormalizedPath).size;
   if (firstSize <= MAX_BYTES) return [firstNormalizedPath];
 
   await cleanTemp(firstNormalizedPath);
   const duration = await probeDurationSeconds(inputPath);
-  const parts = zaloPartCountForSize(firstSize);
-  const segmentDuration = Math.ceil(duration / parts);
-  console.log(`[SocialVideo] Splitting ${Math.round(duration)}s video into ${parts} part(s), ${segmentDuration}s each`);
-  const outputs: string[] = [];
-  for (let i = 0; i < parts; i++) {
-    const start = i * segmentDuration;
-    if (start >= duration) break;
-    const out = await normalizeSegmentForZalo(inputPath, start, Math.min(segmentDuration, duration - start), i + 1);
-    const size = statSync(out).size;
-    if (size > MAX_BYTES) {
-      await cleanTemp(out);
-      throw new Error(`Social video segment ${i + 1} too large after split: ${size}`);
-    }
-    outputs.push(out);
-  }
-  return outputs;
+  const parts = await splitVideoBySize(inputPath, duration, zaloPartCountForSize(firstSize), MAX_BYTES, 'Zalo');
+  console.log(`[SocialVideo] Split ${Math.round(duration)}s video into ${parts.length} part(s)`);
+  return parts;
 }
 
 function cleanMetaText(value: unknown): string | undefined {
