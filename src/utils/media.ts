@@ -150,6 +150,29 @@ export async function cleanTemp(filePath: string): Promise<void> {
   try { await unlink(filePath); } catch { /* ignore */ }
 }
 
+export async function getVideoInfo(inputPath: string): Promise<{ durationMs: number; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const ff = spawn('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height:format=duration',
+      '-of', 'json', inputPath,
+    ], { windowsHide: true });
+    let output = '';
+    let error = '';
+    ff.stdout.on('data', chunk => { output += String(chunk); });
+    ff.stderr.on('data', chunk => { error += String(chunk); });
+    ff.on('close', code => {
+      if (code !== 0) return reject(new Error(`ffprobe exit ${code}: ${error}`));
+      try {
+        const data = JSON.parse(output) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
+        const stream = data.streams?.[0] ?? {};
+        resolve({ durationMs: Math.max(0, Math.round(Number(data.format?.duration ?? 0) * 1000)), width: stream.width ?? 1280, height: stream.height ?? 720 });
+      } catch (err) { reject(err); }
+    });
+    ff.on('error', reject);
+  });
+}
+
 /**
  * Run an array of async tasks with a bounded concurrency limit.
  *
