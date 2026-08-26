@@ -189,10 +189,16 @@ export function markSocialVideoJobPartDone(
 export function setSocialVideoJobPartManifest(
   id: string,
   partManifest: Array<{ index: number; sizeBytes: number; sha256?: string }>,
+  resetSentParts = false,
 ): DurableSocialVideoJob | undefined {
   const job = getSocialVideoJob(id);
   if (!job) return undefined;
-  const next: DurableSocialVideoJob = { ...job, partManifest, updatedAt: new Date().toISOString() };
+  const next: DurableSocialVideoJob = {
+    ...job,
+    partManifest,
+    ...(resetSentParts ? { sentParts: undefined } : {}),
+    updatedAt: new Date().toISOString(),
+  };
   writeJob(next);
   return next;
 }

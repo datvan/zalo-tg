@@ -1,4 +1,4 @@
-﻿import { getZaloApi } from './zalo/client.js';
+import { getZaloApi } from './zalo/client.js';
 import { setupZaloHandler } from './zalo/handler.js';
 import { tgBot } from './telegram/bot.js';
 import { setupTelegramHandler } from './telegram/handler.js';
@@ -53,7 +53,7 @@ setInterval(() => {
   process.exit(13);
 }, 60_000).unref();
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Boot Zalo (also used when /login swaps in a fresh API) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ── Boot Zalo (also used when /login swaps in a fresh API) ───────────────────
 
 function wireZaloListenerDiagnostics(api: Awaited<ReturnType<typeof getZaloApi>>): void {
   api.listener.on('error', (err: unknown) => {
@@ -85,28 +85,28 @@ async function startZalo(api: Awaited<ReturnType<typeof getZaloApi>>): Promise<v
 }
 
 async function main(): Promise<void> {
-  console.log('Ã¢â€¢â€Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢â€”');
+  console.log('╔══════════════════════════════════════╗');
   console.log('Zalo <-> Telegram Bridge  v1.0.1210');
-  console.log('Ã¢â€¢Å¡Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â');
+  console.log('╚══════════════════════════════════════╝');
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬ Wire up Telegram handler BEFORE launching the bot Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // ── Wire up Telegram handler BEFORE launching the bot ─────────────────────
   // setupTelegramHandler returns a setter to inject the Zalo API after auto-login.
   const setZaloApi = setupTelegramHandler(null, async (newApi) => {
     await startZalo(newApi);
   });
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬ Start Telegram bot so /login can be received immediately Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // ── Start Telegram bot so /login can be received immediately ───────────────
   // NOTE: tgBot.launch() runs the polling loop forever, so we must NOT await it.
   // The second argument callback fires once getMe() + deleteWebhook() succeed.
   tgBot.launch({ allowedUpdates: ['message', 'callback_query', 'message_reaction', 'poll_answer', 'poll'] }, () => {
-    console.log('[Boot] Telegram bot started Ã¢Å“â€œ');
+    console.log('[Boot] Telegram bot started ✓');
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Attempt Zalo login in background Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-    // If credentials.json exists Ã¢â€ â€™ connects automatically and updates currentApi.
-    // If not Ã¢â€ â€™ notifies the user to run /login.
+    // ── Attempt Zalo login in background ────────────────────────────────────
+    // If credentials.json exists → connects automatically and updates currentApi.
+    // If not → notifies the user to run /login.
     getZaloApi()
       .then(async (api) => {
-        setZaloApi(api);   // Ã¢â€ Â inject into Telegram handler so TGÃ¢â€ â€™Zalo works
+        setZaloApi(api);   // ← inject into Telegram handler so TG→Zalo works
         await startZalo(api);
       })
       .catch((err: unknown) => {
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
         tgBot.telegram
           .sendMessage(
             config.telegram.groupId,
-            'Ã¢Å¡Â Ã¯Â¸Â ChÃ†Â°a Ã„â€˜Ã„Æ’ng nhÃ¡ÂºÂ­p Zalo. GÃ¡Â»Â­i <b>/login</b> Ã„â€˜Ã¡Â»Æ’ Ã„â€˜Ã„Æ’ng nhÃ¡ÂºÂ­p.',
+            '⚠️ Chưa đăng nhập Zalo. Gửi <b>/login</b> để đăng nhập.',
             { parse_mode: 'HTML' },
           )
           .catch(() => undefined);
@@ -141,9 +141,9 @@ async function main(): Promise<void> {
     });
   });
 
-  console.log('[Boot] Bridge is running Ã°Å¸Å¡â‚¬  (Ctrl+C to stop)');
+  console.log('[Boot] Bridge is running 🚀  (Ctrl+C to stop)');
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬ Graceful shutdown Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = (signal: string) => {
     markHealth({ status: 'stopping' });
     console.log(`\n[Boot] Received ${signal}, shutting down...`);
