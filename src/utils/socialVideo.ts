@@ -15,13 +15,17 @@ const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/i;
 const SOCIAL_VIDEO_RE_GLOBAL = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/ig;
 const UNSUPPORTED_SOCIAL_POST_RE = /https?:\/\/(?:www\.|m\.)?facebook\.com\/share\/(?:p|post)\/\S+/i;
-const MAX_BYTES = 100 * 1024 * 1024;
-const TARGET_SEGMENT_BYTES = 90 * 1024 * 1024;
+const MAX_BYTES = 50 * 1024 * 1024;
+const TARGET_SEGMENT_BYTES = 45 * 1024 * 1024;
 const TELEGRAM_MAX_BYTES = Number(process.env.TELEGRAM_VIDEO_MAX_BYTES || 50 * 1024 * 1024);
 const TELEGRAM_TARGET_SEGMENT_BYTES = Number(process.env.TELEGRAM_VIDEO_TARGET_BYTES || 45 * 1024 * 1024);
 
 export function telegramPartCountForSize(size: number): number {
   return size <= TELEGRAM_MAX_BYTES ? 1 : Math.ceil(size / TELEGRAM_TARGET_SEGMENT_BYTES);
+}
+
+export function zaloPartCountForSize(size: number): number {
+  return size <= MAX_BYTES ? 1 : Math.ceil(size / TARGET_SEGMENT_BYTES);
 }
 
 export async function prepareTelegramVideoPaths(paths: string[]): Promise<string[]> {
@@ -495,7 +499,7 @@ async function splitForZalo(inputPath: string, firstNormalizedPath: string): Pro
 
   await cleanTemp(firstNormalizedPath);
   const duration = await probeDurationSeconds(inputPath);
-  const parts = Math.ceil(firstSize / TARGET_SEGMENT_BYTES);
+  const parts = zaloPartCountForSize(firstSize);
   const segmentDuration = Math.ceil(duration / parts);
   console.log(`[SocialVideo] Splitting ${Math.round(duration)}s video into ${parts} part(s), ${segmentDuration}s each`);
   const outputs: string[] = [];
