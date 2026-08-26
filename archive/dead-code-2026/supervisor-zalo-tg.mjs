@@ -156,4 +156,3 @@ process.on('SIGTERM', () => { stopping = true; stopChild(); process.exit(0); });
 acquireSupervisorLock();
 start('supervisor boot');
 setInterval(check, 60_000);
-
