@@ -1,14 +1,25 @@
 import { Zalo, LoginQRCallbackEventType } from 'zca-js';
 import type { LoginQRCallback } from 'zca-js';
-import { existsSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { imageSizeFromFile } from 'image-size/fromFile';
 import qrcode from 'qrcode-terminal';
 import { config } from '../config.js';
+import { writePrivateJsonFileSync } from '../utils/privateFile.js';
+import { createSharedTempPath, prepareSharedTempFile } from '../utils/sharedTemp.js';
 import type { ZaloAPI } from './types.js';
-
-const QR_IMAGE_PATH = '/tmp/zalo-qr.png';
+import { terminal } from '../utils/terminal.js';
 
 let _api: ZaloAPI | null = null;
+let _activeQRAbort: (() => void) | null = null;
+
+/** Abort the currently active Web QR login, if any. */
+export function cancelActiveQRLogin(): boolean {
+  const abort = _activeQRAbort;
+  if (!abort) return false;
+  _activeQRAbort = null;
+  abort();
+  return true;
+}
 
 // ── imageMetadataGetter ───────────────────────────────────────────────────────
 // Required by zca-js for uploadAttachment (images/GIFs).
@@ -46,11 +57,11 @@ export interface QRLoginHooks {
 
 function saveCredentials(data: { cookie: unknown; imei: string; userAgent: string }): void {
   try {
-    writeFileSync(
-      config.zalo.credentialsPath,
-      JSON.stringify({ imei: data.imei, cookie: data.cookie, userAgent: data.userAgent }, null, 2),
-      'utf8',
-    );
+    writePrivateJsonFileSync(config.zalo.credentialsPath, {
+      imei: data.imei,
+      cookie: data.cookie,
+      userAgent: data.userAgent,
+    });
     console.log(`[Zalo] Credentials saved → ${config.zalo.credentialsPath}`);
   } catch (err) {
     console.error('[Zalo] Failed to save credentials:', err);
@@ -67,31 +78,38 @@ async function runQRLogin(
   zalo: InstanceType<typeof Zalo>,
   hooks: QRLoginHooks = {},
 ): Promise<ZaloAPI> {
+  let expiredCount = 0;
+  let qrDeliveryError: unknown;
+  const qrImagePath = createSharedTempPath('zalo-tg', 'zalo-qr', '.png');
   const callback: LoginQRCallback = (event) => {
     switch (event.type) {
 
       case LoginQRCallbackEventType.QRCodeGenerated: {
         const { code } = event.data;
+        _activeQRAbort = event.actions.abort;
 
         // Save QR image first, then notify hooks
-        const savePromise = (event.actions.saveToFile(QR_IMAGE_PATH) as Promise<unknown>)
+        const savePromise = event.actions.saveToFile(qrImagePath)
           .then(async () => {
             // Print to terminal
             await new Promise<void>((res) => {
               qrcode.generate(code, { small: true }, (qrStr) => {
-                console.clear();
-                console.log('┌─────────────────────────────────────────┐');
-                console.log('│      Quét QR bằng ứng dụng Zalo         │');
-                console.log('└─────────────────────────────────────────┘\n');
+                prepareSharedTempFile(qrImagePath);
+                terminal.qr(qrImagePath);
                 console.log(qrStr);
-                console.log(`(Ảnh QR: ${QR_IMAGE_PATH})\n`);
                 res();
               });
             });
             // Notify external hook (e.g. send to Telegram)
-            await hooks.onQRReady?.(QR_IMAGE_PATH, code);
+            await hooks.onQRReady?.(qrImagePath, code);
           })
-          .catch((err: unknown) => console.error('[Zalo] QR hook error:', err));
+          .catch((err: unknown) => {
+            qrDeliveryError = err;
+            console.error('[Zalo] QR delivery failed:', err);
+            // A login cannot succeed if the user never receives the QR. Abort so
+            // Telegram can report the error and the in-progress lock is cleared.
+            event.actions.abort();
+          });
 
         void savePromise;
         break;
@@ -100,13 +118,17 @@ async function runQRLogin(
       case LoginQRCallbackEventType.QRCodeExpired: {
         console.log('\n[Zalo] QR hết hạn, đang tạo mã mới...');
         void hooks.onExpired?.().catch((e: unknown) => console.error(e));
-        event.actions.retry();
+        expiredCount += 1;
+        // Avoid leaving /login locked forever when nobody can scan the QR.
+        // Two retries give the user roughly five minutes in total.
+        if (expiredCount <= 2) event.actions.retry();
+        else event.actions.abort();
         break;
       }
 
       case LoginQRCallbackEventType.QRCodeScanned: {
         const name = event.data.display_name;
-        console.log(`\n[Zalo] ✓ Đã quét! Chờ xác nhận từ "${name}"...`);
+        terminal.status('zalo login', `QR scanned by "${name}"`, 'success');
         void hooks.onScanned?.(name).catch((e: unknown) => console.error(e));
         break;
       }
@@ -126,9 +148,22 @@ async function runQRLogin(
     }
   };
 
-  const api = await zalo.loginQR({ qrPath: QR_IMAGE_PATH }, callback);
+  let api: Awaited<ReturnType<typeof zalo.loginQR>>;
+  try {
+    api = await zalo.loginQR({ qrPath: qrImagePath }, callback);
+  } catch (err) {
+    if (qrDeliveryError) {
+      const detail = qrDeliveryError instanceof Error
+        ? qrDeliveryError.message
+        : String(qrDeliveryError);
+      throw new Error(`Không thể gửi ảnh QR lên Telegram: ${detail}`, { cause: qrDeliveryError });
+    }
+    throw err;
+  } finally {
+    _activeQRAbort = null;
+  }
   if (!api) throw new Error('[Zalo] QR login failed – no API returned.');
-  console.log('\n[Zalo] Đăng nhập thành công ✓');
+  terminal.status('zalo login', 'authenticated successfully', 'success');
   return api as ZaloAPI;
 }
 
@@ -140,6 +175,11 @@ async function runQRLogin(
  * If credentials are missing or invalid, throws so the caller can notify
  * the user (e.g. via Telegram) to run /login.
  */
+/** Clear the cached API instance so the next `getZaloApi()` call re-authenticates. */
+export function resetZaloApi(): void {
+  _api = null;
+}
+
 export async function getZaloApi(): Promise<ZaloAPI> {
   if (_api) return _api;
 
@@ -153,9 +193,9 @@ export async function getZaloApi(): Promise<ZaloAPI> {
     readFileSync(config.zalo.credentialsPath, 'utf8'),
   ) as { imei: string; cookie: unknown; userAgent: string };
 
-  console.log('[Zalo] Đang đăng nhập bằng credentials đã lưu...');
+  terminal.status('zalo login', 'loading saved credentials…', 'info');
   _api = (await zalo.login(credentials as Parameters<typeof zalo.login>[0])) as ZaloAPI;
-  console.log('[Zalo] Đăng nhập thành công ✓');
+  terminal.status('zalo login', 'saved session authenticated', 'success');
 
   return _api as ZaloAPI;
 }

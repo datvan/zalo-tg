@@ -210,3 +210,4 @@ export function detectMediaType(fileNameOrUrl: string): 'image' | 'video' | 'doc
   if (/\.(mp4|mov|avi|mkv|webm)(\?|$)/.test(lower))  return 'video';
   return 'document';
 }
+

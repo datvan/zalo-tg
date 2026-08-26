@@ -244,13 +244,12 @@ export const friendsCache = {
 // ── Sent message store (TG→Zalo direction) ────────────────────────────────────
 
 export interface SentMsgInfo {
-  /** Zalo msgId returned by api.sendMessage / api.sendVoice */
-  msgId:      string | number;
-  /** Zalo conversation ID */
-  zaloId:     string;
-  /** 0 = DM, 1 = Group */
+  msgId?: string | number;
+  msgIds?: Array<string | number>;
+  zaloId: string;
   threadType: 0 | 1;
 }
+function firstMsgId(info: SentMsgInfo): string | number | undefined { return info.msgId ?? info.msgIds?.[0]; }
 
 const SENT_MAX = 5000;
 const sentMapPath = path.resolve(config.dataDir, 'sent-message-map.json');
@@ -268,74 +267,23 @@ function persistSentMap(): void {
   const obj = Object.fromEntries([..._sentMap.entries()].map(([k, v]) => [String(k), v]));
   writeFileSync(sentMapPath, JSON.stringify(obj, null, 2), 'utf8');
 }
-
-const _sentInitial  = loadSentMap();
-const _sentMap      = new Map<number, SentMsgInfo>(Object.entries(_sentInitial).map(([k, v]) => [Number(k), v])); // tgMsgId → info
-const _sentByZaloId = new Map<string, number>([..._sentMap.entries()].map(([tgMsgId, info]) => [String(info.msgId), tgMsgId])); // String(zaloMsgId) → tgMsgId
-const _sentOrder: number[] = [..._sentMap.keys()];
-const PENDING_SELF_MAX = 200;
-const PENDING_SELF_TTL_MS = 45_000;
 interface PendingSelfMessage { key: string; at: number }
+function pendingSelfKey(zaloId: string, threadType: 0 | 1, text: string): string { return `${threadType}:${zaloId}:${text.replace(/\s+/g, ' ').trim()}`; }
+const _sentInitial = loadSentMap();
+const _sentMap = new Map<number, SentMsgInfo>(Object.entries(_sentInitial).map(([k, v]) => [Number(k), v]));
+const _sentByZaloId = new Map<string, number>();
+for (const [tgId, info] of _sentMap) { const id = firstMsgId(info); if (id !== undefined) _sentByZaloId.set(String(id), tgId); }
+const _sentOrder: number[] = [..._sentMap.keys()];
 const _pendingSelfMessages: PendingSelfMessage[] = [];
-
-function normalizePendingText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function pendingSelfKey(zaloId: string, threadType: 0 | 1, text: string): string {
-  return `${threadType}:${zaloId}:${normalizePendingText(text)}`;
-}
-
-function prunePendingSelf(now = Date.now()): void {
-  while (_pendingSelfMessages.length && now - _pendingSelfMessages[0]!.at > PENDING_SELF_TTL_MS) {
-    _pendingSelfMessages.shift();
-  }
-  while (_pendingSelfMessages.length > PENDING_SELF_MAX) _pendingSelfMessages.shift();
-}
-
+const _sending = new Set<string>();
 export const sentMsgStore = {
-  /** Record a message we sent from TG→Zalo. tgMsgId is the user's TG message. */
-  save(tgMsgId: number, info: SentMsgInfo): void {
-    if (_sentOrder.length >= SENT_MAX) {
-      const old = _sentOrder.shift();
-      if (old !== undefined) {
-        const oldInfo = _sentMap.get(old);
-        if (oldInfo) _sentByZaloId.delete(String(oldInfo.msgId));
-        _sentMap.delete(old);
-      }
-    }
-    _sentMap.set(tgMsgId, info);
-    _sentByZaloId.set(String(info.msgId), tgMsgId);
-    _sentOrder.push(tgMsgId);
-    persistSentMap();
-  },
-
-  get(tgMsgId: number): SentMsgInfo | undefined {
-    return _sentMap.get(tgMsgId);
-  },
-
-  /**
-   * Reverse lookup: given a Zalo msgId we sent (TG→Zalo direction),
-   * return the original TG message_id. Used so Zalo replies to our
-   * sent messages chain correctly on the TG side.
-   */
-  getByZaloMsgId(zaloMsgId: string): number | undefined {
-    return _sentByZaloId.get(zaloMsgId);
-  },
-
-  markPendingSelf(zaloId: string, threadType: 0 | 1, text: string): void {
-    prunePendingSelf();
-    _pendingSelfMessages.push({ key: pendingSelfKey(zaloId, threadType, text), at: Date.now() });
-  },
-
-  consumePendingSelf(zaloId: string, threadType: 0 | 1, text: string): boolean {
-    prunePendingSelf();
-    const key = pendingSelfKey(zaloId, threadType, text);
-    const index = _pendingSelfMessages.findIndex(entry => entry.key === key);
-    if (index < 0) return false;
-    _pendingSelfMessages.splice(index, 1);
-    return true;
-  },
+  save(tgMsgId: number, info: SentMsgInfo): void { _sentMap.set(tgMsgId, info); _sentOrder.push(tgMsgId); for (const id of info.msgIds ?? [info.msgId]) if (id !== undefined) _sentByZaloId.set(String(id), tgMsgId); persistSentMap(); },
+  get(tgMsgId: number): SentMsgInfo | undefined { return _sentMap.get(tgMsgId); },
+  getByZaloMsgId(zaloMsgId: string): number | undefined { return _sentByZaloId.get(zaloMsgId); },
+  markPendingSelf(zaloId: string, threadType: 0 | 1, text: string): void { _pendingSelfMessages.push({ key: pendingSelfKey(zaloId, threadType, text), at: Date.now() }); },
+  consumePendingSelf(zaloId: string, threadType: 0 | 1, text: string): boolean { const key = pendingSelfKey(zaloId, threadType, text); const i = _pendingSelfMessages.findIndex(e => e.key === key); if (i < 0) return false; _pendingSelfMessages.splice(i, 1); return true; },
+  markSending(zaloId: string): void { _sending.add(zaloId); },
+  unmarkSending(zaloId: string): void { _sending.delete(zaloId); },
 };
 
 // ── TG media group buffer (TG→Zalo album sync) ────────────────────────────────

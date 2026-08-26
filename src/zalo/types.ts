@@ -1,4 +1,4 @@
-import type { ThreadType } from 'zca-js';
+import type { API, ThreadType } from 'zca-js';
 
 // ── Incoming Zalo message ─────────────────────────────────────────────────────
 
@@ -46,6 +46,8 @@ export const ZALO_MSG_TYPES = {
   POLL:       'group.poll',
   // Contact card (shared profile) — Zalo sends as 'chat.forward' with msgType 6
   CONTACT:    'chat.forward',
+  // E-card / birthday notification
+  ECARD:      'chat.ecard',
 } as const;
 
 /** A single @mention inside a Zalo group message. */
@@ -103,5 +105,4 @@ export interface ZaloGroupInfoResponse {
   gridInfoMap: Record<string, ZaloGridInfo>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ZaloAPI = any;
+export type ZaloAPI = API;
