@@ -1,5 +1,5 @@
-﻿import axios from 'axios';
-import { createWriteStream, mkdirSync } from 'fs';
+import axios from 'axios';
+import { createWriteStream, mkdirSync, statSync, unlinkSync } from 'fs';
 import { readFile, unlink, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
 import { gunzipSync } from 'zlib';
@@ -38,6 +38,11 @@ export async function downloadToTemp(url: string, fileName?: string): Promise<st
     writer.on('error', reject);
   });
 
+  if (statSync(filePath).size === 0) {
+    unlinkSync(filePath);
+    throw new Error(`Downloaded empty file: ${url}`);
+  }
+
   return filePath;
 }
 
@@ -66,6 +71,35 @@ export async function convertToM4a(inputPath: string): Promise<string> {
 }
 
 /** Convert Telegram video sticker/webm to MP4 so Zalo receives motion, not a still thumbnail. */
+export async function getVideoInfo(inputPath: string): Promise<{ durationMs: number; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const ff = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height:format=duration',
+      '-of', 'json',
+      inputPath,
+    ], { windowsHide: true });
+    let out = '';
+    let err = '';
+    ff.stdout.on('data', d => { out += String(d); });
+    ff.stderr.on('data', d => { err += String(d); });
+    ff.on('close', code => {
+      if (code !== 0) return reject(new Error(`ffprobe exit ${code}: ${err}`));
+      try {
+        const data = JSON.parse(out) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
+        const stream = data.streams?.[0] ?? {};
+        resolve({
+          durationMs: Math.max(0, Math.round(Number(data.format?.duration ?? 0) * 1000)),
+          width: stream.width ?? 1280,
+          height: stream.height ?? 720,
+        });
+      } catch (e) { reject(e); }
+    });
+    ff.on('error', reject);
+  });
+}
+
 export async function convertToMp4(inputPath: string): Promise<string> {
   mkdirSync(TMP_DIR, { recursive: true });
   const outputPath = path.join(TMP_DIR, `animation_${Date.now()}.mp4`);

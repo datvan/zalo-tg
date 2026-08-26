@@ -7,26 +7,61 @@ import { fetchText, downloadBinary } from './tiktokWebFallback.js';
 import { downloadTikTokViaBrowser } from './tiktokBrowserFallback.js';
 import { downloadThreadsViaBrowser } from './threadsBrowserFallback.js';
 import { downloadFacebookViaBrowser } from './facebookBrowserFallback.js';
+import { FB_NETSCAPE_COOKIES_PATH } from './facebookBrowserSession.js';
+import { ytDlpBinPath } from './ytDlpMaintenance.js';
 
 const TMP_DIR = process.env.TMP || process.env.TEMP || '/tmp';
 // Stop at JSON/string delimiters when Zalo embeds link previews as serialized payloads.
-const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/i;
-const SOCIAL_VIDEO_RE_GLOBAL = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/ig;
+const SOCIAL_VIDEO_RE = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/i;
+const SOCIAL_VIDEO_RE_GLOBAL = /https?:\/\/(?:www\.|m\.|vt\.|vm\.)?(?:tiktok\.com\/[^\s"'<>\\\]}]+|youtube\.com\/[^\s"'<>\\\]}]+|youtu\.be\/[^\s"'<>\\\]}]+|facebook\.com\/(?:reel|watch|share\/r|share\/v)\/[^\s"'<>\\\]}]+|fb\.watch\/[^\s"'<>\\\]}]+|threads\.(?:com|net)\/(?:@[^\/\s"'<>\\\]}]+\/post\/|share\/)[^\s"'<>\\\]}]+|vk\.com\/video[^\s"'<>\\\]}]+|vkvideo\.ru\/video[^\s"'<>\\\]}]+)/ig;
 const UNSUPPORTED_SOCIAL_POST_RE = /https?:\/\/(?:www\.|m\.)?facebook\.com\/share\/(?:p|post)\/\S+/i;
 const MAX_BYTES = 100 * 1024 * 1024;
 const TARGET_SEGMENT_BYTES = 90 * 1024 * 1024;
+const TELEGRAM_MAX_BYTES = Number(process.env.TELEGRAM_VIDEO_MAX_BYTES || 50 * 1024 * 1024);
+const TELEGRAM_TARGET_SEGMENT_BYTES = Number(process.env.TELEGRAM_VIDEO_TARGET_BYTES || 45 * 1024 * 1024);
+
+export function telegramPartCountForSize(size: number): number {
+  return size <= TELEGRAM_MAX_BYTES ? 1 : Math.ceil(size / TELEGRAM_TARGET_SEGMENT_BYTES);
+}
+
+export async function prepareTelegramVideoPaths(paths: string[]): Promise<string[]> {
+  const prepared: string[] = [];
+  try {
+    for (const inputPath of paths) {
+      const size = statSync(inputPath).size;
+      if (size <= TELEGRAM_MAX_BYTES) {
+        prepared.push(inputPath);
+        continue;
+      }
+      const duration = await probeDurationSeconds(inputPath);
+      const partCount = telegramPartCountForSize(size);
+      const segmentDuration = Math.ceil(duration / partCount);
+      for (let i = 0; i < partCount; i++) {
+        const start = i * segmentDuration;
+        if (start >= duration) break;
+        const part = await normalizeSegmentForZalo(inputPath, start, Math.min(segmentDuration, duration - start), i + 1);
+        const partSize = statSync(part).size;
+        if (partSize > TELEGRAM_MAX_BYTES) {
+          await cleanTemp(part);
+          throw new Error(`Telegram video segment ${i + 1} too large after split: ${partSize}`);
+        }
+        prepared.push(part);
+      }
+    }
+    return prepared;
+  } catch (err) {
+    for (const part of new Set(prepared)) await cleanTemp(part);
+    throw err;
+  }
+}
 const MAX_QUEUE_PER_THREAD = 10;
 const SOCIAL_JOB_TIMEOUT_MS = Number(process.env.SOCIAL_JOB_TIMEOUT_MS || 12 * 60 * 1000);
 const SOCIAL_QUEUE_STALE_MS = Number(process.env.SOCIAL_QUEUE_STALE_MS || 15 * 60 * 1000);
 
-const DEFAULT_YTDLP_BIN = 'C:\\Users\\Admin\\AppData\\Roaming\\Python\\Python311\\Scripts\\yt-dlp.exe';
-const DEFAULT_FB_COOKIES_PATH = path.resolve(process.cwd(), 'data', 'facebook-cookies.txt');
-const DEFAULT_FB_COOKIE_JSON_PATH = 'J:\\CrawBot\\Cookies\\www.facebook.com_12-07-2026.json';
 let loggedYtDlpBin = false;
 
 function getYtDlpCommand(): { command: string; argsPrefix: string[] } {
-  const envBin = process.env.YTDLP_BIN?.trim();
-  const bin = envBin || (existsSync(DEFAULT_YTDLP_BIN) ? DEFAULT_YTDLP_BIN : 'yt-dlp');
+  const bin = ytDlpBinPath();
   if (!loggedYtDlpBin) {
     console.log(`[SocialVideo] Using yt-dlp binary: ${bin}`);
     loggedYtDlpBin = true;
@@ -38,36 +73,7 @@ function getYtDlpCommand(): { command: string; argsPrefix: string[] } {
 function facebookCookiesPath(): string | undefined {
   const explicitPath = process.env.FB_COOKIES_PATH?.trim();
   if (explicitPath && existsSync(explicitPath)) return explicitPath;
-
-  const jsonPath = process.env.FB_COOKIE_JSON_PATH?.trim() || DEFAULT_FB_COOKIE_JSON_PATH;
-  if (!existsSync(jsonPath)) return existsSync(DEFAULT_FB_COOKIES_PATH) ? DEFAULT_FB_COOKIES_PATH : undefined;
-  try {
-    const parsed = JSON.parse(readFileSync(jsonPath, 'utf8')) as { cookies?: Array<Record<string, unknown>> };
-    const cookies = (parsed.cookies ?? []).map(cookie => {
-      const domain = String(cookie.domain ?? '.facebook.com');
-      const httpOnly = Boolean(cookie.httpOnly);
-      const expires = Number(cookie.expirationDate ?? cookie.expires ?? 0);
-      return [
-        `${httpOnly ? '#HttpOnly_' : ''}${domain}`,
-        domain.startsWith('.') ? 'TRUE' : 'FALSE',
-        String(cookie.path ?? '/'),
-        cookie.secure === false ? 'FALSE' : 'TRUE',
-        Number.isFinite(expires) && expires > 0 ? String(Math.floor(expires)) : '0',
-        String(cookie.name ?? ''),
-        String(cookie.value ?? ''),
-      ].join('\t');
-    }).filter(row => row.split('\t')[5] && row.split('\t')[6]);
-    if (!cookies.some(row => row.includes('\tc_user\t')) || !cookies.some(row => row.includes('\txs\t'))) {
-      console.warn('[SocialVideo] Facebook cookie JSON has no usable login session');
-      return undefined;
-    }
-    mkdirSync(path.dirname(DEFAULT_FB_COOKIES_PATH), { recursive: true });
-    writeFileSync(DEFAULT_FB_COOKIES_PATH, `# Netscape HTTP Cookie File\n${cookies.join('\n')}\n`, { mode: 0o600 });
-    return DEFAULT_FB_COOKIES_PATH;
-  } catch (err) {
-    console.warn('[SocialVideo] Facebook cookie JSON unreadable:', err instanceof Error ? err.message : err);
-    return existsSync(DEFAULT_FB_COOKIES_PATH) ? DEFAULT_FB_COOKIES_PATH : undefined;
-  }
+  return existsSync(FB_NETSCAPE_COOKIES_PATH) ? FB_NETSCAPE_COOKIES_PATH : undefined;
 }
 
 function getYtDlpCookiesArgs(url: string): string[] {
@@ -155,6 +161,28 @@ const UPLOAD_ATTACHMENT_TIMEOUT_MS = Number(process.env.ZALO_UPLOAD_ATTACHMENT_T
  */
 export function withUploadTimeout<T>(promise: Promise<T>, label: string, timeoutMs = UPLOAD_ATTACHMENT_TIMEOUT_MS): Promise<T> {
   return withTimeout(promise, timeoutMs, label);
+}
+
+export async function withUploadRetry<T>(
+  upload: () => Promise<T>,
+  label: string,
+  attempts = 3,
+  retryDelayMs = 2000,
+  timeoutMs = UPLOAD_ATTACHMENT_TIMEOUT_MS,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await withUploadTimeout(upload(), label, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= attempts) break;
+      const delayMs = retryDelayMs * attempt;
+      console.warn(`[SocialVideo] ${label} failed (${attempt}/${attempts}), retrying in ${delayMs}ms:`, err);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -297,7 +325,16 @@ export function enqueueSocialVideo<T>(threadKey: string, label: string, run: () 
     queue.push({
       label,
       run: run as () => Promise<unknown>,
-      resolve: resolve as (value: unknown) => void,
+      // Both resolve and reject must clear the dedup key: it exists to collapse duplicate
+      // *concurrent* requests (e.g. the same link posted twice within DEDUP_TTL_MS), not to
+      // outlive a single completed attempt. The durable queue's retry-without-throwing path
+      // (scheduleRetry) resolves this promise normally on a retryable failure — leaving the
+      // key in place after resolve silently dropped every subsequent retry as a "duplicate"
+      // until the 30-minute TTL expired, stalling the job indefinitely.
+      resolve: ((value: unknown) => {
+        if (scopedDedupKey) dedupKeys.delete(scopedDedupKey);
+        resolve(value as T | undefined);
+      }) as (value: unknown) => void,
       reject: (err: unknown) => {
         if (scopedDedupKey) dedupKeys.delete(scopedDedupKey);
         reject(err);
@@ -911,8 +948,6 @@ export async function downloadSocialVideo(url: string): Promise<SocialVideoDownl
     for (const candidate of candidates) await cleanTemp(candidate);
   }
 }
-
-
 
 
 

@@ -1,54 +1,10 @@
-import { createWriteStream, readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
+import { createWriteStream, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
-import path from 'path';
-import puppeteer, { type CookieParam } from 'puppeteer';
-
-const DEFAULT_FB_COOKIE_JSON = 'J:\\CrawBot\\Cookies\\www.facebook.com_12-07-2026.json';
-const DEFAULT_FB_COOKIE_NETSCAPE = path.resolve(process.cwd(), 'data', 'facebook-cookies.txt');
-
-function cookieParamsFromJson(file: string): CookieParam[] {
-  if (!existsSync(file)) return [];
-  const data = JSON.parse(readFileSync(file, 'utf8')) as { cookies?: Array<Record<string, unknown>> };
-  return (data.cookies ?? []).map(c => ({
-    name: String(c.name ?? ''),
-    value: String(c.value ?? ''),
-    domain: String(c.domain ?? '.facebook.com'),
-    path: String(c.path ?? '/'),
-    expires: typeof c.expirationDate === 'number' ? Math.floor(c.expirationDate) : undefined,
-    httpOnly: Boolean(c.httpOnly),
-    secure: c.secure !== false,
-    sameSite: 'None' as const,
-  })).filter(c => c.name && c.value);
-}
-
-function netscapeCookieRows(file: string): string[][] {
-  if (!existsSync(file)) return [];
-  return readFileSync(file, 'utf8').split(/\r?\n/)
-    .filter(l => l && !l.startsWith('#'))
-    .map(l => l.split('\t'))
-    .filter(p => p.length >= 7);
-}
-
-function cookieHeaderFromNetscape(file: string): string {
-  return netscapeCookieRows(file).map(p => `${p[5]}=${p[6]}`).join('; ');
-}
-
-function cookieParamsFromNetscape(file: string): CookieParam[] {
-  return netscapeCookieRows(file).map(p => ({
-    name: p[5],
-    value: p[6],
-    domain: p[0]?.replace(/^#HttpOnly_/, '') || '.facebook.com',
-    path: p[2] || '/',
-    expires: Number.isFinite(Number(p[4])) && Number(p[4]) > 0 ? Number(p[4]) : undefined,
-    httpOnly: p[0]?.startsWith('#HttpOnly_') ?? false,
-    secure: /^TRUE$/i.test(p[3] ?? ''),
-    sameSite: 'None' as const,
-  })).filter(c => c.name && c.value);
-}
+import { facebookCookieHeader, getFacebookBrowser } from './facebookBrowserSession.js';
 
 async function downloadWithFetch(url: string, outPath: string): Promise<void> {
-  const cookie = cookieHeaderFromNetscape(process.env.FB_COOKIES_PATH?.trim() || DEFAULT_FB_COOKIE_NETSCAPE);
+  const cookie = await facebookCookieHeader();
   const res = await fetch(url, {
     headers: {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36',
@@ -178,6 +134,17 @@ function extractFacebookVideoId(url: string): string | undefined {
     if (paramId && /^\d{6,}$/.test(paramId)) return paramId;
   } catch { /* ignore */ }
   return undefined;
+}
+
+export function facebookUnavailablePageReason(state: { title?: string; bodyHint?: string }): string | undefined {
+  const text = `${state.title ?? ''}\n${state.bodyHint ?? ''}`.replace(/\s+/g, ' ').trim();
+  if (/(log in to view|đăng nhập để xem|log in.*create new account)/i.test(text)) {
+    return 'Facebook login/session is required or expired';
+  }
+  if (!/(this page isn't available at the moment|this content isn't available right now|the link you followed may be broken|sorry, this content isn't available|trang này hiện không khả dụng|nội dung này hiện không khả dụng)/i.test(text)) {
+    return undefined;
+  }
+  return 'Facebook page unavailable for current session';
 }
 
 export interface TargetFingerprint {
@@ -341,19 +308,11 @@ async function probeHasAudio(filePath: string): Promise<boolean> {
 }
 
 export async function downloadFacebookViaBrowser(url: string, outPath: string): Promise<void> {
-  const cookieJson = process.env.FB_COOKIE_JSON_PATH?.trim() || DEFAULT_FB_COOKIE_JSON;
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-dev-shm-usage'],
-  });
+  const browser = await getFacebookBrowser();
+  const page = await browser.newPage();
   try {
-    const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36');
     await page.setViewport({ width: 1280, height: 900 });
-    const cookieNet = process.env.FB_COOKIES_PATH?.trim() || DEFAULT_FB_COOKIE_NETSCAPE;
-    const cookies = [...cookieParamsFromJson(cookieJson), ...cookieParamsFromNetscape(cookieNet)];
-    if (cookies.length) await page.setCookie(...cookies);
-    console.warn(`[SocialVideo] Facebook browser fallback cookies json=${cookieParamsFromJson(cookieJson).length} netscape=${cookieParamsFromNetscape(cookieNet).length}`);
     const seen: Array<{ url: string; len: number; ct: string }> = [];
     page.on('response', (res) => {
       const u = res.url();
@@ -369,22 +328,45 @@ export async function downloadFacebookViaBrowser(url: string, outPath: string): 
     let domSrc: string | undefined;
     let driftedAwayFromTarget = false;
     for (const target of [...new Set(targets)]) {
-      try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 60000 }); } catch { /* keep trying */ }
+      let navigated = false;
+      try {
+        await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        navigated = true;
+      } catch { /* keep trying */ }
+      if (!navigated) continue;
+      const pageState = await page.evaluate(() => ({
+        title: document.title,
+        bodyHint: document.body?.innerText?.slice(0, 2000),
+        hasVideo: Boolean(document.querySelector('video')),
+      })).catch(() => undefined);
+      const unavailableReason = facebookUnavailablePageReason(pageState ?? {});
+      if (unavailableReason) {
+        throw new Error(`Facebook browser fallback: ${unavailableReason}; link may be private, removed, or unavailable for current session (url=${page.url()}).`);
+      }
       targetId ??= extractFacebookVideoId(page.url());
       for (let i = 0; i < 35 && !domSrc; i++) {
         const state = await page.evaluate(() => {
+          const bodyHint = document.body?.innerText?.slice(0, 2000);
           const els = [...document.querySelectorAll('div[role="button"], a[role="button"], button, span, a')] as HTMLElement[];
           const continueEl = els.find(e => /^(Continue as|Tiếp tục|Tiếp tục với|Continue|Log in as)/i.test((e.innerText || e.textContent || '').trim()));
           if (continueEl) {
             continueEl.click();
-            return { clickedContinue: true, src: undefined };
+            return { clickedContinue: true, src: undefined, title: document.title, bodyHint };
           }
           const v = document.querySelector('video') as HTMLVideoElement | null;
-          if (v) { v.muted = true; void v.play().catch(() => undefined); return { clickedContinue: false, src: v.currentSrc || v.src || undefined }; }
+          if (v) {
+            v.muted = true;
+            void v.play().catch(() => undefined);
+            return { clickedContinue: false, src: v.currentSrc || v.src || undefined, title: document.title, bodyHint };
+          }
           window.scrollBy(0, 180);
-          return { clickedContinue: false, src: undefined };
-        }).catch(() => ({ clickedContinue: false, src: undefined }));
+          return { clickedContinue: false, src: undefined, title: document.title, bodyHint };
+        }).catch(() => ({ clickedContinue: false, src: undefined, title: '', bodyHint: '' }));
         if (state.clickedContinue) console.warn('[SocialVideo] Facebook browser fallback clicked Continue-as button');
+        const unavailableReason = facebookUnavailablePageReason(state);
+        if (unavailableReason) {
+          throw new Error(`Facebook browser fallback: ${unavailableReason}; link may be private, removed, or unavailable for current session (url=${page.url()}).`);
+        }
         if (state.src && /fbcdn|fbsbx|\.mp4/i.test(state.src)) domSrc = fullFacebookMediaUrl(state.src);
         // Reels/Watch is an auto-advancing feed: scrollBy() above (fired when no <video> is
         // found yet) can carry the SPA route to a different, unrelated video. If that happens,
@@ -514,8 +496,6 @@ export async function downloadFacebookViaBrowser(url: string, outPath: string): 
       try { unlinkSync(acceptedVideoPath); } catch { /* ignore */ }
     }
   } finally {
-    const pages = await browser.pages().catch(() => []);
-    await Promise.all(pages.map(p => p.close().catch(() => undefined)));
-    await browser.close().catch(() => undefined);
+    await page.close().catch(() => undefined);
   }
 }

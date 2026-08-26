@@ -273,6 +273,25 @@ const _sentInitial  = loadSentMap();
 const _sentMap      = new Map<number, SentMsgInfo>(Object.entries(_sentInitial).map(([k, v]) => [Number(k), v])); // tgMsgId → info
 const _sentByZaloId = new Map<string, number>([..._sentMap.entries()].map(([tgMsgId, info]) => [String(info.msgId), tgMsgId])); // String(zaloMsgId) → tgMsgId
 const _sentOrder: number[] = [..._sentMap.keys()];
+const PENDING_SELF_MAX = 200;
+const PENDING_SELF_TTL_MS = 45_000;
+interface PendingSelfMessage { key: string; at: number }
+const _pendingSelfMessages: PendingSelfMessage[] = [];
+
+function normalizePendingText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function pendingSelfKey(zaloId: string, threadType: 0 | 1, text: string): string {
+  return `${threadType}:${zaloId}:${normalizePendingText(text)}`;
+}
+
+function prunePendingSelf(now = Date.now()): void {
+  while (_pendingSelfMessages.length && now - _pendingSelfMessages[0]!.at > PENDING_SELF_TTL_MS) {
+    _pendingSelfMessages.shift();
+  }
+  while (_pendingSelfMessages.length > PENDING_SELF_MAX) _pendingSelfMessages.shift();
+}
 
 export const sentMsgStore = {
   /** Record a message we sent from TG→Zalo. tgMsgId is the user's TG message. */
@@ -302,6 +321,20 @@ export const sentMsgStore = {
    */
   getByZaloMsgId(zaloMsgId: string): number | undefined {
     return _sentByZaloId.get(zaloMsgId);
+  },
+
+  markPendingSelf(zaloId: string, threadType: 0 | 1, text: string): void {
+    prunePendingSelf();
+    _pendingSelfMessages.push({ key: pendingSelfKey(zaloId, threadType, text), at: Date.now() });
+  },
+
+  consumePendingSelf(zaloId: string, threadType: 0 | 1, text: string): boolean {
+    prunePendingSelf();
+    const key = pendingSelfKey(zaloId, threadType, text);
+    const index = _pendingSelfMessages.findIndex(entry => entry.key === key);
+    if (index < 0) return false;
+    _pendingSelfMessages.splice(index, 1);
+    return true;
   },
 };
 
@@ -385,7 +418,7 @@ export const zaloAlbumStore = {
       existing.zaloMsgIds.push(msgId);
       existing.timer = setTimeout(() => {
         _zaloAlbumBuffers.delete(key);
-        onFlush({ urls: existing.urls, zaloMsgIds: existing.zaloMsgIds, ...meta });
+        Promise.resolve(onFlush({ urls: existing.urls, zaloMsgIds: existing.zaloMsgIds, ...meta })).catch(err => console.error('[Store] Album flush error:', err));
       }, 600);
     } else {
       const buf: ZaloAlbumBuffer = {
@@ -394,7 +427,7 @@ export const zaloAlbumStore = {
         zaloMsgIds: [msgId],
         timer: setTimeout(() => {
           _zaloAlbumBuffers.delete(key);
-          onFlush({ urls: buf.urls, zaloMsgIds: buf.zaloMsgIds, ...meta });
+          Promise.resolve(onFlush({ urls: buf.urls, zaloMsgIds: buf.zaloMsgIds, ...meta })).catch(err => console.error('[Store] Album flush error:', err));
         }, 600),
       };
       _zaloAlbumBuffers.set(key, buf);

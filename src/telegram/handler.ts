@@ -7,15 +7,18 @@ import { store, msgStore, userCache, friendsCache, sentMsgStore, pollStore, medi
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, convertToMp4, convertTgsToMp4, getVideoInfo } from '../utils/media.js';
-import { extractSocialVideoUrls, enqueueSocialVideo, downloadSocialVideo, formatSocialVideoCaption, createSocialVideoThumbnail, withUploadTimeout } from '../utils/socialVideo.js';
+import { extractSocialVideoUrls, enqueueSocialVideo, downloadSocialVideo, prepareTelegramVideoPaths, formatSocialVideoCaption, createSocialVideoThumbnail, withUploadTimeout } from '../utils/socialVideo.js';
 import { rememberSelfVideoCaption, rememberSelfVideoFallback } from '../utils/selfVideoCaption.js';
 import {
   beginSocialVideoJob,
+  buildSocialVideoJobPartManifest,
   completeSocialVideoJob,
   createDurableSocialVideoJob,
   failSocialVideoJob,
+  hasSocialVideoJobPartManifestMismatch,
   listReplayableSocialVideoJobs,
   markSocialVideoJobPartDone,
+  setSocialVideoJobPartManifest,
   socialVideoJobPartClientId,
   type DurableSocialVideoJob,
 } from '../utils/durableSocialVideoQueue.js';
@@ -184,10 +187,18 @@ export function setupTelegramHandler(
 
   const runDurableSocialVideoJob = async (api: ZaloAPI, job: DurableSocialVideoJob): Promise<void> => {
     const localPaths: string[] = [];
+    const downloadedPaths: string[] = [];
     try {
       console.log(`[TG->Zalo][SocialVideo] Downloading ${job.label}: ${job.url}`);
       const downloaded = await downloadSocialVideo(job.url);
-      localPaths.push(...downloaded.paths);
+      downloadedPaths.push(...downloaded.paths);
+      const preparedPaths = await prepareTelegramVideoPaths(downloaded.paths);
+      localPaths.push(...preparedPaths);
+      const currentManifest = await buildSocialVideoJobPartManifest(preparedPaths);
+      if (hasSocialVideoJobPartManifestMismatch(job, currentManifest)) {
+        throw new Error(`Durable social video part manifest mismatch for ${job.id}`);
+      }
+      setSocialVideoJobPartManifest(job.id, currentManifest);
       const sleepSocialUpload = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
       const withSocialUploadTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs = Number(process.env.SOCIAL_UPLOAD_TIMEOUT_MS || 120_000)): Promise<T> => {
         let timer: NodeJS.Timeout | undefined;
@@ -281,13 +292,13 @@ export function setupTelegramHandler(
         }
         const partLabel = `part ${i + 1}/${localPaths.length}`;
         const partCaption = formatSocialVideoCaption(downloaded.meta, localPaths.length > 1 ? `Part ${i + 1}/${localPaths.length}` : undefined);
-        const { sendResult } = await sendSocialVideoPartWithRetry(localPaths[i], i, partLabel, partCaption);
+        const { sendResult } = await sendSocialVideoPartWithRetry(localPaths[i]!, i, partLabel, partCaption);
         rememberSelfVideoCaption(sendResult, partCaption);
-        rememberSelfVideoFallback(sendResult, localPaths[i], partCaption);
+        rememberSelfVideoFallback(sendResult, localPaths[i]!, partCaption);
         console.log(`[TG->Zalo][SocialVideo] Sent native video ${partLabel} target=${job.threadType}:${job.zaloId} result=${JSON.stringify(sendResult ?? {})}`);
       }
     } finally {
-      for (const localPath of localPaths) await cleanTemp(localPath);
+      for (const localPath of new Set([...downloadedPaths, ...localPaths])) await cleanTemp(localPath);
     }
   };
 
@@ -327,7 +338,7 @@ export function setupTelegramHandler(
   };
 
   const replayDurableSocialVideoJobs = (api: ZaloAPI): void => {
-    const jobs = listReplayableSocialVideoJobs();
+    const jobs = listReplayableSocialVideoJobs().filter(job => job.source === 'telegram' && job.target === 'zalo');
     if (jobs.length) console.log(`[SocialVideo][Durable] replaying ${jobs.length} job(s)`);
     for (const job of jobs) enqueueDurableSocialVideoJob(api, job);
   };
@@ -698,14 +709,7 @@ export function setupTelegramHandler(
         'message_thread_id' in msg ? (msg.message_thread_id as number | undefined) : undefined;
       if (!topicId) return;
 
-      // Zalo not connected yet
-      if (!currentApi) {
-        console.warn('[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] currentApi is null ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ Zalo not connected. Ignoring message.');
-        return;
-      }
 
-      // Capture api reference so closures below always use the same instance
-      const api = currentApi;
 
       // Look up the corresponding Zalo conversation
       const entry = store.getEntryByTopic(topicId);
@@ -718,7 +722,6 @@ export function setupTelegramHandler(
       // Ensure numeric value is correctly mapped to ThreadType enum at runtime
       const threadType: ThreadType = entry.type === 1 ? ThreadType.Group : ThreadType.User;
 
-      // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
         const errMsg = err instanceof Error ? err.message : String(err);
         const code = (err as { code?: number }).code;
@@ -753,6 +756,8 @@ export function setupTelegramHandler(
           } else {
             for (const socialVideoUrl of socialVideoUrls) {
               const job = createDurableSocialVideoJob({
+                source: 'telegram',
+                target: 'zalo',
                 sourceMessageId: msg.message_id,
                 topicId,
                 text: msg.text,
@@ -760,12 +765,17 @@ export function setupTelegramHandler(
                 zaloId,
                 threadType,
               });
-              enqueueDurableSocialVideoJob(api, job);
+              if (currentApi) enqueueDurableSocialVideoJob(currentApi, job);
             }
             return;
           }
         }
-        console.log(`[TGÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Zalo] sendMessage ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
+        if (!currentApi) {
+          console.warn('[TG→Zalo][SocialVideo] currentApi is null; queued social jobs await replay, plain text ignored');
+          return;
+        }
+        const api = currentApi;
+        console.log(`[TG→Zalo] sendMessage → zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
         // Look up Zalo quote data if this TG message is a reply
         const replyToMsgId = msg.reply_to_message?.message_id;
         const zaloQuote = replyToMsgId !== undefined ? msgStore.getQuote(replyToMsgId) : undefined;
@@ -814,6 +824,12 @@ export function setupTelegramHandler(
         }
         return;
       }
+      // Non-text media still requires a live Zalo API.
+      if (!currentApi) {
+        console.warn('[TG→Zalo] currentApi is null; ignoring non-social-video message');
+        return;
+      }
+      const api = currentApi;
 
       // helper: download TG file ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ send via uploadAttachment ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ cleanup
       const TG_FILE_LIMIT = 20 * 1024 * 1024; // 20 MB ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Telegram Bot API hard limit

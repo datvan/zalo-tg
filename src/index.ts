@@ -4,6 +4,9 @@ import { tgBot } from './telegram/bot.js';
 import { setupTelegramHandler } from './telegram/handler.js';
 import { config } from './config.js';
 import { getHealth, markError, markHealth } from './health.js';
+import { startFacebookSessionWatchdog } from './utils/facebookBrowserSession.js';
+import { startYtDlpWatchdog } from './utils/ytDlpMaintenance.js';
+import { escapeHtml } from './utils/format.js';
 
 process.on('beforeExit', (code) => {
   console.error('[ProcessDiag] beforeExit', code, new Error('beforeExit stack').stack);
@@ -116,6 +119,26 @@ async function main(): Promise<void> {
           )
           .catch(() => undefined);
       });
+
+    startFacebookSessionWatchdog((reason) => {
+      tgBot.telegram
+        .sendMessage(
+          config.telegram.groupId,
+          `⚠️ Facebook session hỏng, video Facebook sẽ fail cho đến khi login lại.\nChạy: <code>node scripts/login-facebook-profile.mjs</code>\n<code>${escapeHtml(reason)}</code>`,
+          { parse_mode: 'HTML' },
+        )
+        .catch(() => undefined);
+    });
+
+    startYtDlpWatchdog((reason) => {
+      tgBot.telegram
+        .sendMessage(
+          config.telegram.groupId,
+          `⚠️ yt-dlp không tải được video YouTube ngay cả sau khi tự update — YouTube có thể vừa đổi thêm thứ mới. Cần kiểm tra thủ công: <code>yt-dlp -U</code> hoặc chờ bản yt-dlp mới hơn.\n<code>${escapeHtml(reason)}</code>`,
+          { parse_mode: 'HTML' },
+        )
+        .catch(() => undefined);
+    });
   });
 
   console.log('[Boot] Bridge is running Ã°Å¸Å¡â‚¬  (Ctrl+C to stop)');
